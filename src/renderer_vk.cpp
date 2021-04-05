@@ -1881,7 +1881,7 @@ VK_IMPORT_INSTANCE
 					| BGFX_CAPS_TEXTURE_BLIT
 					| BGFX_CAPS_TEXTURE_READ_BACK
 					| BGFX_CAPS_TEXTURE_COMPARE_ALL
-					| BGFX_CAPS_TEXTURE_CUBE_ARRAY
+					| (m_deviceFeatures.imageCubeArray ? BGFX_CAPS_TEXTURE_CUBE_ARRAY : 0)
 					| BGFX_CAPS_VERTEX_ATTRIB_HALF
 					| BGFX_CAPS_VERTEX_ATTRIB_UINT10
 					| BGFX_CAPS_VERTEX_ID
@@ -6107,20 +6107,21 @@ VK_DESTROY
 				vkUnmapMemory(device, stagingDeviceMem);
 			}
 
+			VkImageCreateFlags createFlags = 0;
+			if (m_numSides % 6 == 0)
+			{
+				createFlags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+			}
+			if (VK_IMAGE_VIEW_TYPE_3D == m_type)
+			{
+				createFlags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT_KHR;
+			}
+
 			// create texture and allocate its device memory
 			VkImageCreateInfo ici;
 			ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 			ici.pNext = NULL;
-			ici.flags = 0
-				| (VK_IMAGE_VIEW_TYPE_CUBE == m_type
-					? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT
-					: 0
-					)
-				| (VK_IMAGE_VIEW_TYPE_3D == m_type
-					? VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT_KHR
-					: 0
-					)
-				;
+			ici.flags = createFlags;
 			ici.pQueueFamilyIndices   = NULL;
 			ici.queueFamilyIndexCount = 0;
 			ici.initialLayout         = VK_IMAGE_LAYOUT_UNDEFINED;
