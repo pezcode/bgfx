@@ -378,6 +378,8 @@ VK_DESTROY_FUNC(DescriptorSet);
 		void shutdown();
 
 		VkResult allocate(const VkMemoryRequirements& _requirements, MemoryType::Enum _type, AllocationVK* _allocation);
+		VkResult createBuffer(const VkBufferCreateInfo& _info, MemoryType::Enum _type, ::VkBuffer* _buffer, AllocationVK* _allocation);
+		VkResult createImage(const VkImageCreateInfo& _info, MemoryType::Enum _type, ::VkImage* _image, AllocationVK* _allocation);
 		void release(AllocationVK& _allocation);
 
 		VkResult map(const AllocationVK& _allocation, void** _pointer, VkDeviceSize offset = 0);

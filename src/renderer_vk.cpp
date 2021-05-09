@@ -4238,37 +4238,20 @@ VK_IMPORT_DEVICE
 			bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 			bci.pNext = NULL;
 			bci.flags = 0;
-			bci.size = _size;
+			bci.size  = _size;
 			bci.queueFamilyIndexCount = 0;
-			bci.pQueueFamilyIndices = NULL;
+			bci.pQueueFamilyIndices   = NULL;
 			bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 			bci.usage = 0
 				| (MemoryType::Upload   == _type ? VK_BUFFER_USAGE_TRANSFER_SRC_BIT : 0)
 				| (MemoryType::Download == _type ? VK_BUFFER_USAGE_TRANSFER_DST_BIT : 0)
 				;
 
-			result = vkCreateBuffer(m_device, &bci, m_allocatorCb, _buffer);
-			if (VK_SUCCESS != result)
-			{
-				BX_TRACE("Create staging buffer error: vkCreateBuffer failed %d: %s.", result, getName(result) );
-				return result;
-			}
-
-			VkMemoryRequirements mr;
-			vkGetBufferMemoryRequirements(m_device, *_buffer, &mr);
-
-			result = m_deviceAllocator.allocate(mr, _type, _allocation);
+			result = m_deviceAllocator.createBuffer(bci, _type, _buffer, _allocation);
 
 			if (VK_SUCCESS != result)
 			{
-				BX_TRACE("Create staging buffer error: allocate failed %d: %s.", result, getName(result) );
-				return result;
-			}
-
-			result = vkBindBufferMemory(m_device, *_buffer, _allocation->m_memory, _allocation->m_offset);
-			if (VK_SUCCESS != result)
-			{
-				BX_TRACE("Create staging buffer error: vkBindBufferMemory failed %d: %s.", result, getName(result) );
+				BX_TRACE("Create staging buffer error: createBuffer failed %d: %s.", result, getName(result) );
 				return result;
 			}
 
@@ -4469,6 +4452,90 @@ VK_DESTROY
 	}
 
 	VkResult MemoryAllocatorVK::allocate(const VkMemoryRequirements& _requirements, MemoryType::Enum _type, AllocationVK* _allocation)
+	VkResult MemoryAllocatorVK::createBuffer(const VkBufferCreateInfo& _info, MemoryType::Enum _type, ::VkBuffer* _buffer, AllocationVK* _allocation)
+	{
+		VkResult result = VK_SUCCESS;
+
+		const VkDevice device = s_renderVK->m_device;
+		const VkAllocationCallbacks* allocatorCb = s_renderVK->m_allocatorCb;
+
+		result = vkCreateBuffer(
+			  device
+			, &_info
+			, allocatorCb
+			, _buffer
+			);
+
+		if (VK_SUCCESS != result)
+		{
+			BX_TRACE("Create buffer error: vkCreateBuffer failed %d: %s.", result, getName(result) );
+			return result;
+		}
+
+		VkMemoryRequirements mr;
+		vkGetBufferMemoryRequirements(device, *_buffer, &mr);
+
+		result = allocate(mr, _type, _allocation);
+
+		if (VK_SUCCESS != result)
+		{
+			BX_TRACE("Create buffer error: allocate failed %d: %s.", result, getName(result) );
+			return result;
+		}
+
+		result = vkBindBufferMemory(device, *_buffer, _allocation->m_memory, _allocation->m_offset);
+
+		if (VK_SUCCESS != result)
+		{
+			BX_TRACE("Create buffer error: vkBindBufferMemory failed %d: %s.", result, getName(result) );
+			return result;
+		}
+
+		return result;
+	}
+
+	VkResult MemoryAllocatorVK::createImage(const VkImageCreateInfo& _info, MemoryType::Enum _type, ::VkImage* _image, AllocationVK* _allocation)
+	{
+		VkResult result = VK_SUCCESS;
+
+		const VkDevice device = s_renderVK->m_device;
+		const VkAllocationCallbacks* allocatorCb = s_renderVK->m_allocatorCb;
+
+		result = vkCreateImage(
+			  device
+			, &_info
+			, allocatorCb
+			, _image
+			);
+
+		if (VK_SUCCESS != result)
+		{
+			BX_TRACE("Create image error: vkCreateImage failed %d: %s.", result, getName(result) );
+			return result;
+		}
+
+		VkMemoryRequirements mr;
+		vkGetImageMemoryRequirements(device, *_image, &mr);
+
+		result = allocate(mr, _type, _allocation);
+
+		if (VK_SUCCESS != result)
+		{
+			BX_TRACE("Create image error: allocate failed %d: %s.", result, getName(result) );
+			return result;
+		}
+
+		result = vkBindImageMemory(device, *_image, _allocation->m_memory, _allocation->m_offset);
+
+		if (VK_SUCCESS != result)
+		{
+			BX_TRACE("Create image error: vkBindImageMemory failed %d: %s.", result, getName(result) );
+			return result;
+		}
+
+		return result;
+	}
+
 	{
 		// TODO align and round size of host-visible, non-coherent memory up to nonCoherentAtomSize
 
@@ -4498,10 +4565,10 @@ VK_DESTROY
 			break;
 		}
 
-		VkMemoryAllocateInfo ma;
-		ma.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-		ma.pNext = NULL;
-		ma.allocationSize = _requirements.size;
+		VkMemoryAllocateInfo mai;
+		mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		mai.pNext = NULL;
+		mai.allocationSize = _requirements.size;
 
 		_allocation->m_memory = VK_NULL_HANDLE;
 
@@ -4517,8 +4584,8 @@ VK_DESTROY
 
 				if (searchIndex >= 0)
 				{
-					ma.memoryTypeIndex = searchIndex;
-					result = vkAllocateMemory(device, &ma, allocatorCb, &_allocation->m_memory);
+					mai.memoryTypeIndex = searchIndex;
+					result = vkAllocateMemory(device, &mai, allocatorCb, &_allocation->m_memory);
 					
 					_allocation->m_offset = 0;
 					_allocation->m_size = _requirements.size;
@@ -4685,42 +4752,26 @@ VK_DESTROY
 
 	void ScratchBufferVK::create(uint32_t _size, uint32_t _count)
 	{
-		const VkAllocationCallbacks* allocatorCb = s_renderVK->m_allocatorCb;
-		const VkDevice device = s_renderVK->m_device;
 		const VkPhysicalDeviceLimits& deviceLimits = s_renderVK->m_deviceProperties.limits;
 
 		const uint32_t align = uint32_t(deviceLimits.minUniformBufferOffsetAlignment);
 		const uint32_t entrySize = bx::strideAlign(_size, align);
-		const uint32_t totalSize = entrySize * _count;
+		m_size = entrySize * _count;
 
 		VkBufferCreateInfo bci;
 		bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 		bci.pNext = NULL;
 		bci.flags = 0;
-		bci.size  = totalSize;
+		bci.size  = m_size;
 		bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
 		bci.sharingMode           = VK_SHARING_MODE_EXCLUSIVE;
 		bci.queueFamilyIndexCount = 0;
 		bci.pQueueFamilyIndices   = NULL;
 
-		VK_CHECK(vkCreateBuffer(
-			  device
-			, &bci
-			, allocatorCb
-			, &m_buffer
-			) );
-
-		VkMemoryRequirements mr;
-		vkGetBufferMemoryRequirements(device, m_buffer, &mr);
-
-		VK_CHECK(s_renderVK->m_deviceAllocator.allocate(mr, MemoryType::Shared, &m_deviceMem) );
-
-		m_size = (uint32_t)mr.size;
-		m_pos  = 0;
-
-		VK_CHECK(vkBindBufferMemory(device, m_buffer, m_deviceMem.m_memory, m_deviceMem.m_offset) );
-
+		VK_CHECK(s_renderVK->m_deviceAllocator.createBuffer(bci, MemoryType::Shared, &m_buffer, &m_deviceMem) );
 		VK_CHECK(s_renderVK->m_deviceAllocator.map(m_deviceMem, (void**)&m_data) );
+
+		m_pos = 0;
 	}
 
 	void ScratchBufferVK::destroy()
@@ -4789,16 +4840,7 @@ VK_DESTROY
 		bci.queueFamilyIndexCount = 0;
 		bci.pQueueFamilyIndices   = NULL;
 
-		const VkAllocationCallbacks* allocatorCb = s_renderVK->m_allocatorCb;
-		const VkDevice device = s_renderVK->m_device;
-		VK_CHECK(vkCreateBuffer(device, &bci, allocatorCb, &m_buffer) );
-
-		VkMemoryRequirements mr;
-		vkGetBufferMemoryRequirements(device, m_buffer, &mr);
-
-		VK_CHECK(s_renderVK->m_deviceAllocator.allocate(mr, MemoryType::Device, &m_deviceMem) );
-
-		VK_CHECK(vkBindBufferMemory(device, m_buffer, m_deviceMem.m_memory, m_deviceMem.m_offset) );
+		VK_CHECK(s_renderVK->m_deviceAllocator.createBuffer(bci, MemoryType::Device, &m_buffer, &m_deviceMem) );
 
 		if (!m_dynamic)
 		{
@@ -5823,9 +5865,6 @@ VK_DESTROY
 	{
 		VkResult result = VK_SUCCESS;
 
-		const VkAllocationCallbacks* allocatorCb = s_renderVK->m_allocatorCb;
-		const VkDevice device = s_renderVK->m_device;
-
 		if (m_sampler.Count > 1)
 		{
 			BX_ASSERT(VK_IMAGE_VIEW_TYPE_3D != m_type, "Can't create multisample 3D image.");
@@ -5875,27 +5914,11 @@ VK_DESTROY
 			;
 		ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
 
-		result = vkCreateImage(device, &ici, allocatorCb, &m_textureImage);
+		result = s_renderVK->m_deviceAllocator.createImage(ici, MemoryType::Device, &m_textureImage, &m_textureDeviceMem);
+
 		if (VK_SUCCESS != result)
 		{
-			BX_TRACE("Create texture image error: vkCreateImage failed %d: %s.", result, getName(result) );
-			return result;
-		}
-
-		VkMemoryRequirements imageMemReq;
-		vkGetImageMemoryRequirements(device, m_textureImage, &imageMemReq);
-
-		result = s_renderVK->m_deviceAllocator.allocate(imageMemReq, MemoryType::Device, &m_textureDeviceMem);
-		if (VK_SUCCESS != result)
-		{
-			BX_TRACE("Create texture image error: allocate failed %d: %s.", result, getName(result) );
-			return result;
-		}
-
-		result = vkBindImageMemory(device, m_textureImage, m_textureDeviceMem.m_memory, m_textureDeviceMem.m_offset);
-		if (VK_SUCCESS != result)
-		{
-			BX_TRACE("Create texture image error: vkBindImageMemory failed %d: %s.", result, getName(result) );
+			BX_TRACE("Create texture image error: createImage failed %d: %s.", result, getName(result) );
 			return result;
 		}
 
@@ -5918,27 +5941,11 @@ VK_DESTROY
 			ici_resolve.usage &= ~VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 			ici_resolve.flags &= ~VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
 
-			result = vkCreateImage(device, &ici_resolve, allocatorCb, &m_singleMsaaImage);
+			result = s_renderVK->m_deviceAllocator.createImage(ici_resolve, MemoryType::Device, &m_singleMsaaImage, &m_singleMsaaDeviceMem);
+
 			if (VK_SUCCESS != result)
 			{
-				BX_TRACE("Create texture image error: vkCreateImage failed %d: %s.", result, getName(result) );
-				return result;
-			}
-
-			VkMemoryRequirements imageMemReq_resolve;
-			vkGetImageMemoryRequirements(device, m_singleMsaaImage, &imageMemReq_resolve);
-
-			result = s_renderVK->m_deviceAllocator.allocate(imageMemReq_resolve, MemoryType::Device, &m_singleMsaaDeviceMem);
-			if (VK_SUCCESS != result)
-			{
-				BX_TRACE("Create texture image error: allocate failed %d: %s.", result, getName(result) );
-				return result;
-			}
-
-			result = vkBindImageMemory(device, m_singleMsaaImage, m_singleMsaaDeviceMem.m_memory, m_singleMsaaDeviceMem.m_offset);
-			if (VK_SUCCESS != result)
-			{
-				BX_TRACE("Create texture image error: vkBindImageMemory failed %d: %s.", result, getName(result) );
+				BX_TRACE("Create texture image error: createImage failed %d: %s.", result, getName(result) );
 				return result;
 			}
 
