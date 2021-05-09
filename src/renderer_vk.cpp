@@ -4446,13 +4446,26 @@ VK_DESTROY
 		bx::memSet(&m_memoryProperties, 0, sizeof(m_memoryProperties) );
 		vkGetPhysicalDeviceMemoryProperties(physicalDevice, &m_memoryProperties);
 
+		constexpr VkDeviceSize blockSize = 8 << 20;
+
 		const VkPhysicalDeviceLimits& limits = s_renderVK->m_deviceProperties.limits;
 		m_mapAlignment = limits.nonCoherentAtomSize;
+		m_minAllocationSize = limits.bufferImageGranularity;
+		m_minBlockSize = bx::max(blockSize, m_minAllocationSize);
+
+		for (uint32_t ii = 0; ii < m_memoryProperties.memoryTypeCount; ++ii)
+		{
+			m_pools[ii].m_allocationCount = 0;
+			m_pools[ii].m_allocationSize = 0;
+		}
 	}
 
 	void MemoryAllocatorVK::shutdown()
 	{
-
+		for (uint32_t ii = 0; ii < m_memoryProperties.memoryTypeCount; ++ii)
+		{
+			// TODO release
+		}
 	}
 
 	VkResult MemoryAllocatorVK::createBuffer(const VkBufferCreateInfo& _info, MemoryType::Enum _type, ::VkBuffer* _buffer, AllocationVK* _allocation)
@@ -4674,7 +4687,11 @@ VK_DESTROY
 					
 					_allocation->m_offset = 0;
 					_allocation->m_size = _requirements.size;
+					_allocation->m_pool = searchIndex;
 					_allocation->m_properties = propertyFlags[ii];
+
+					m_pools[_allocation->m_pool].m_allocationCount++;
+					m_pools[_allocation->m_pool].m_allocationSize += _allocation->m_size;
 				}
 			}
 			while (result != VK_SUCCESS
@@ -4695,6 +4712,9 @@ VK_DESTROY
 		// TODO unmap if mapped
 
 		BX_ASSERT(0 == _allocation.m_offset, "");
+
+		m_pools[_allocation.m_pool].m_allocationCount--;
+		m_pools[_allocation.m_pool].m_allocationSize -= _allocation.m_size;
 
 		s_renderVK->release(_allocation.m_memory);
 	}
@@ -4765,7 +4785,7 @@ VK_DESTROY
 		return vkInvalidateMappedMemoryRanges(device, 1, &range);
 	}
 
-	bool MemoryAllocatorVK::updateMemoryBudget()
+	void MemoryAllocatorVK::updateStats()
 	{
 		if (s_extension[Extension::EXT_memory_budget].m_supported)
 		{
@@ -4781,15 +4801,24 @@ VK_DESTROY
 
 			vkGetPhysicalDeviceMemoryProperties2KHR(physicalDevice, &pdmp2);
 
-			bx::memCopy(heapUsage,  dmbp.heapUsage,  sizeof(VkDeviceSize) * VK_MAX_MEMORY_HEAPS);
-			bx::memCopy(heapBudget, dmbp.heapBudget, sizeof(VkDeviceSize) * VK_MAX_MEMORY_HEAPS);
-
-			return true;
+			bx::memCopy(m_heapUsage,  dmbp.heapUsage,  sizeof(VkDeviceSize) * m_memoryProperties.memoryHeapCount);
+			bx::memCopy(m_heapBudget, dmbp.heapBudget, sizeof(VkDeviceSize) * m_memoryProperties.memoryHeapCount);
 		}
+		else
+		{
+			for (uint32_t ii = 0; ii < m_memoryProperties.memoryHeapCount; ++ii)
+			{
+				m_heapUsage[ii]  = 0;
+				m_heapBudget[ii] = m_memoryProperties.memoryHeaps[ii].size;
+			}
 
-		// TODO calculate usage from allocations
-
-		return false;
+			for (uint32_t ii = 0; ii < m_memoryProperties.memoryTypeCount; ++ii)
+			{
+				const Pool& pool = m_pools[ii];
+				const uint32_t heap = m_memoryProperties.memoryTypes[ii].heapIndex;
+				m_heapUsage[heap] += pool.m_allocationSize;
+			}
+		}
 	}
 
 	int32_t MemoryAllocatorVK::selectMemoryType(uint32_t _memoryTypeBits, uint32_t _propertyFlags, int32_t _startIndex)
@@ -9061,16 +9090,12 @@ VK_DESTROY
 
 		const int64_t timerFreq = bx::getHPFrequency();
 
-		int64_t gpuMemoryAvailable = -INT64_MAX;
-		int64_t gpuMemoryUsed      = -INT64_MAX;
+		int64_t gpuMemoryAvailable = 0;
+		int64_t gpuMemoryUsed      = 0;
 
-		const bool hasBudgetData = m_deviceAllocator.updateMemoryBudget();
+		m_deviceAllocator.updateStats();
 
-		if (hasBudgetData)
 		{
-			gpuMemoryAvailable = 0;
-			gpuMemoryUsed      = 0;
-
 			const uint32_t heapCount = m_deviceAllocator.m_memoryProperties.memoryHeapCount;
 			const VkMemoryHeap* heaps = m_deviceAllocator.m_memoryProperties.memoryHeaps;
 
@@ -9078,8 +9103,8 @@ VK_DESTROY
 			{
 				if (heaps[ii].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
 				{
-					gpuMemoryAvailable += m_deviceAllocator.heapBudget[ii];
-					gpuMemoryUsed      += m_deviceAllocator.heapUsage[ii];
+					gpuMemoryAvailable += m_deviceAllocator.m_heapBudget[ii];
+					gpuMemoryUsed      += m_deviceAllocator.m_heapUsage[ii];
 				}
 			}
 		}
@@ -9140,17 +9165,10 @@ VK_DESTROY
 				for (uint32_t ii = 0; ii < heapCount; ++ii)
 				{
 					char budget[16];
-					char usage[16] = "--";
+					bx::prettify(budget, BX_COUNTOF(budget), m_deviceAllocator.m_heapBudget[ii]);
 
-					if (hasBudgetData)
-					{
-						bx::prettify(budget, BX_COUNTOF(budget), m_deviceAllocator.heapBudget[ii]);
-						bx::prettify(usage,  BX_COUNTOF(usage),  m_deviceAllocator.heapUsage[ii]);
-					}
-					else
-					{
-						bx::prettify(budget, BX_COUNTOF(budget), heaps[ii].size);
-					}
+					char usage[16];
+					bx::prettify(usage, BX_COUNTOF(usage), m_deviceAllocator.m_heapUsage[ii]);
 
 					const bool local = (!!(heaps[ii].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) );
 

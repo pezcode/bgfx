@@ -372,11 +372,32 @@ VK_DESTROY_FUNC(DescriptorSet);
 		VkDeviceMemory m_memory = VK_NULL_HANDLE;
 		VkDeviceSize m_offset;
 		VkDeviceSize m_size;
+		uint32_t m_pool;
 		VkMemoryPropertyFlags m_properties;
 	};
 
 	struct MemoryAllocatorVK
 	{
+		struct Pool
+		{
+			uint32_t m_allocationCount;
+			VkDeviceSize m_allocationSize;
+		};
+
+		struct Block
+		{
+			VkDeviceMemory m_memory;
+			VkDeviceSize m_free;
+			uint32_t m_mapCount;
+		};
+
+		struct Allocation
+		{
+			VkDeviceSize m_offset;
+			VkDeviceSize m_size;
+			bool occupied;
+		};
+
 		void init();
 		void shutdown();
 
@@ -392,8 +413,6 @@ VK_DESTROY_FUNC(DescriptorSet);
 		VkResult flush(const AllocationVK& _allocation, VkDeviceSize _offset = 0, VkDeviceSize _size = VK_WHOLE_SIZE);
 		VkResult invalidate(const AllocationVK& _allocation, VkDeviceSize _offset = 0, VkDeviceSize _size = VK_WHOLE_SIZE);
 
-		bool updateMemoryBudget();
-
 		int32_t selectMemoryType(uint32_t _memoryTypeBits, uint32_t _propertyFlags, int32_t _startIndex = 0);
 
 		void alignMappedRange(const AllocationVK& _allocation, VkDeviceSize _offset, VkDeviceSize _size, VkMappedMemoryRange* _range);
@@ -402,9 +421,15 @@ VK_DESTROY_FUNC(DescriptorSet);
 
 		VkPhysicalDeviceMemoryProperties m_memoryProperties;
 		VkDeviceSize m_mapAlignment;
+		VkDeviceSize m_minAllocationSize;
+		VkDeviceSize m_minBlockSize;
 
-		VkDeviceSize heapUsage[VK_MAX_MEMORY_HEAPS];
-		VkDeviceSize heapBudget[VK_MAX_MEMORY_HEAPS];
+		Pool m_pools[VK_MAX_MEMORY_TYPES];
+
+		void updateStats();
+
+		VkDeviceSize m_heapUsage[VK_MAX_MEMORY_HEAPS];
+		VkDeviceSize m_heapBudget[VK_MAX_MEMORY_HEAPS];
 	};
 
 	struct ScratchBufferVK
