@@ -353,17 +353,51 @@ VK_DESTROY_FUNC(DescriptorSet);
 		HashMap m_hashMap;
 	};
 
-	class ScratchBufferVK
+	struct MemoryType
 	{
-	public:
-		ScratchBufferVK()
+		enum Enum
 		{
-		}
+			Upload,
+			Download,
+			Device,
+			Shared
+		};
+	};
 
-		~ScratchBufferVK()
-		{
-		}
+	struct AllocationVK
+	{
+		VkDeviceMemory m_memory = VK_NULL_HANDLE;
+		VkDeviceSize m_offset;
+		VkDeviceSize m_size;
+		VkMemoryPropertyFlags m_properties;
+	};
 
+	struct MemoryAllocatorVK
+	{
+		void init();
+		void shutdown();
+
+		VkResult allocate(const VkMemoryRequirements& _requirements, MemoryType::Enum _type, AllocationVK* _allocation);
+		void release(AllocationVK& _allocation);
+
+		VkResult map(const AllocationVK& _allocation, void** _pointer);
+		void unmap(const AllocationVK& _allocation);
+
+		VkResult flush(const AllocationVK& _allocation, VkDeviceSize _offset = 0);
+		VkResult invalidate(const AllocationVK& _allocation, VkDeviceSize _offset = 0);
+
+		bool updateMemoryBudget();
+
+		int32_t selectMemoryType(uint32_t _memoryTypeBits, uint32_t _propertyFlags, int32_t _startIndex = 0);
+
+		VkPhysicalDeviceMemoryProperties m_memoryProperties;
+
+		VkDeviceSize heapUsage[VK_MAX_MEMORY_HEAPS];
+		VkDeviceSize heapBudget[VK_MAX_MEMORY_HEAPS];
+	};
+
+	struct ScratchBufferVK
+	{
 		void create(uint32_t _size, uint32_t _count);
 		void destroy();
 		void reset();
@@ -371,7 +405,7 @@ VK_DESTROY_FUNC(DescriptorSet);
 		void flush();
 
 		VkBuffer m_buffer;
-		VkDeviceMemory m_deviceMem;
+		AllocationVK m_deviceMem;
 		uint8_t* m_data;
 		uint32_t m_size;
 		uint32_t m_pos;
@@ -381,7 +415,6 @@ VK_DESTROY_FUNC(DescriptorSet);
 	{
 		BufferVK()
 			: m_buffer(VK_NULL_HANDLE)
-			, m_deviceMem(VK_NULL_HANDLE)
 			, m_size(0)
 			, m_flags(BGFX_BUFFER_NONE)
 			, m_dynamic(false)
@@ -393,19 +426,13 @@ VK_DESTROY_FUNC(DescriptorSet);
 		void destroy();
 
 		VkBuffer m_buffer;
-		VkDeviceMemory m_deviceMem;
+		AllocationVK m_deviceMem;
 		uint32_t m_size;
 		uint16_t m_flags;
 		bool m_dynamic;
 	};
 
 	typedef BufferVK IndexBufferVK;
-
-	struct MsaaSamplerVK
-	{
-		uint16_t Count;
-		VkSampleCountFlagBits Sample;
-	};
 
 	struct VertexBufferVK : public BufferVK
 	{
@@ -552,7 +579,7 @@ VK_DESTROY_FUNC(DescriptorSet);
 		Query m_query[BGFX_CONFIG_MAX_VIEWS*4];
 
 		VkBuffer m_readback;
-		VkDeviceMemory m_readbackMemory;
+		AllocationVK m_readbackMemory;
 		VkQueryPool m_queryPool;
 		const uint64_t* m_queryResult;
 		bx::RingBufferControl m_control;
@@ -576,7 +603,7 @@ VK_DESTROY_FUNC(DescriptorSet);
 		OcclusionQueryHandle m_handle[BGFX_CONFIG_MAX_OCCLUSION_QUERIES];
 
 		VkBuffer m_readback;
-		VkDeviceMemory m_readbackMemory;
+		AllocationVK m_readbackMemory;
 		VkQueryPool m_queryPool;
 		const uint32_t* m_queryResult;
 		bx::RingBufferControl m_control;
@@ -588,12 +615,18 @@ VK_DESTROY_FUNC(DescriptorSet);
 		void destroy();
 		uint32_t pitch(uint8_t _mip = 0) const;
 		void copyImageToBuffer(VkCommandBuffer _commandBuffer, VkBuffer _buffer, VkImageLayout _layout, VkImageAspectFlags _aspect, uint8_t _mip = 0) const;
-		void readback(VkDeviceMemory _memory, VkDeviceSize _offset, void* _data, uint8_t _mip = 0) const;
+		void readback(AllocationVK& _memory, void* _data, uint8_t _mip = 0) const;
 
 		VkImage  m_image;
 		uint32_t m_width;
 		uint32_t m_height;
 		TextureFormat::Enum  m_format;
+	};
+
+	struct MsaaSamplerVK
+	{
+		uint16_t Count;
+		VkSampleCountFlagBits Sample;
 	};
 
 	struct TextureVK
@@ -603,10 +636,8 @@ VK_DESTROY_FUNC(DescriptorSet);
 			, m_sampler({ 1, VK_SAMPLE_COUNT_1_BIT })
 			, m_format(VK_FORMAT_UNDEFINED)
 			, m_textureImage(VK_NULL_HANDLE)
-			, m_textureDeviceMem(VK_NULL_HANDLE)
 			, m_currentImageLayout(VK_IMAGE_LAYOUT_UNDEFINED)
 			, m_singleMsaaImage(VK_NULL_HANDLE)
-			, m_singleMsaaDeviceMem(VK_NULL_HANDLE)
 			, m_currentSingleMsaaImageLayout(VK_IMAGE_LAYOUT_UNDEFINED)
 		{
 		}
@@ -643,13 +674,13 @@ VK_DESTROY_FUNC(DescriptorSet);
 		VkComponentMapping m_components;
 		VkImageAspectFlags m_aspectMask;
 
-		VkImage        m_textureImage;
-		VkDeviceMemory m_textureDeviceMem;
-		VkImageLayout  m_currentImageLayout;
+		VkImage       m_textureImage;
+		AllocationVK  m_textureDeviceMem;
+		VkImageLayout m_currentImageLayout;
 
-		VkImage        m_singleMsaaImage;
-		VkDeviceMemory m_singleMsaaDeviceMem;
-		VkImageLayout  m_currentSingleMsaaImageLayout;
+		VkImage       m_singleMsaaImage;
+		AllocationVK  m_singleMsaaDeviceMem;
+		VkImageLayout m_currentSingleMsaaImageLayout;
 
 		VkImageLayout m_sampledLayout;
 

@@ -839,7 +839,6 @@ VK_IMPORT_DEVICE
 	template<> VkObjectType getType<VkSurfaceKHR         >() { return VK_OBJECT_TYPE_SURFACE_KHR;           }
 	template<> VkObjectType getType<VkSwapchainKHR       >() { return VK_OBJECT_TYPE_SWAPCHAIN_KHR;         }
 
-
 	template<typename Ty>
 	static BX_NO_INLINE void setDebugObjectName(VkDevice _device, Ty _object, const char* _format, ...)
 	{
@@ -1061,7 +1060,6 @@ VK_IMPORT_DEVICE
 			, m_depthClamp(false)
 			, m_wireframe(false)
 			, m_captureBuffer(VK_NULL_HANDLE)
-			, m_captureMemory(VK_NULL_HANDLE)
 			, m_captureSize(0)
 		{
 		}
@@ -1651,7 +1649,7 @@ VK_IMPORT_INSTANCE
 					}
 				}
 
-				vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &m_memoryProperties);
+				m_deviceAllocator.init();
 			}
 
 			{
@@ -2072,7 +2070,7 @@ VK_IMPORT_DEVICE
 			}
 
 			m_backBuffer.destroy();
-
+			m_deviceAllocator.shutdown();
 			m_cmd.shutdown();
 
 			vkDestroy(m_pipelineCache);
@@ -2235,9 +2233,9 @@ VK_IMPORT_DEVICE
 			uint32_t pitch  = texture.m_readback.pitch(_mip);
 			uint32_t size = height * pitch;
 
-			VkDeviceMemory stagingMemory;
 			VkBuffer stagingBuffer;
-			VK_CHECK(createReadbackBuffer(size, &stagingBuffer, &stagingMemory) );
+			AllocationVK stagingMemory;
+			VK_CHECK(createStagingBuffer(size, MemoryType::Download, &stagingBuffer, &stagingMemory) );
 
 			texture.m_readback.copyImageToBuffer(
 				  m_commandBuffer
@@ -2249,10 +2247,10 @@ VK_IMPORT_DEVICE
 
 			kick(true);
 
-			texture.m_readback.readback(stagingMemory, 0, _data, _mip);
+			texture.m_readback.readback(stagingMemory, _data, _mip);
 
-			vkDestroy(stagingBuffer);
-			vkDestroy(stagingMemory);
+			release(stagingBuffer);
+			release(stagingMemory);
 		}
 
 		void resizeTexture(TextureHandle _handle, uint16_t _width, uint16_t _height, uint8_t _numMips, uint16_t _numLayers) override
@@ -2395,14 +2393,14 @@ VK_IMPORT_DEVICE
 			const uint8_t bpp = bimg::getBitsPerPixel(bimg::TextureFormat::Enum(swapChain.m_colorFormat) );
 			const uint32_t size = frameBuffer.m_width * frameBuffer.m_height * bpp / 8;
 
-			VkDeviceMemory stagingMemory;
 			VkBuffer stagingBuffer;
-			VK_CHECK(createReadbackBuffer(size, &stagingBuffer, &stagingMemory) );
+			AllocationVK stagingMemory;
+			VK_CHECK(createStagingBuffer(size, MemoryType::Download, &stagingBuffer, &stagingMemory) );
 
 			readSwapChain(swapChain, stagingBuffer, stagingMemory, callback, _filePath);
 
-			vkDestroy(stagingBuffer);
-			vkDestroy(stagingMemory);
+			release(stagingBuffer);
+			release(stagingMemory);
 		}
 
 		void updateViewName(ViewId _id, const char* _name) override
@@ -2482,6 +2480,15 @@ VK_IMPORT_DEVICE
 			{
 				m_cmd.release(uint64_t(_object.vk), getType<Ty>() );
 				_object = VK_NULL_HANDLE;
+			}
+		}
+
+		template<>
+		void release<AllocationVK>(AllocationVK& _allocation)
+		{
+			if (VK_NULL_HANDLE != _allocation.m_memory)
+			{
+				m_deviceAllocator.release(_allocation);
 			}
 		}
 
@@ -2646,7 +2653,7 @@ VK_IMPORT_DEVICE
 					release(m_captureMemory);
 
 					m_captureSize = captureSize;
-					VK_CHECK(createReadbackBuffer(m_captureSize, &m_captureBuffer, &m_captureMemory) );
+					VK_CHECK(createStagingBuffer(m_captureSize, MemoryType::Download, &m_captureBuffer, &m_captureMemory) );
 				}
 
 				g_callback->captureBegin(m_resolution.width, m_resolution.height, dstPitch, TextureFormat::BGRA8, false);
@@ -3939,7 +3946,7 @@ VK_IMPORT_DEVICE
 
 		typedef void (*SwapChainReadFunc)(void* /*src*/, uint32_t /*width*/, uint32_t /*height*/, uint32_t /*pitch*/, const void* /*userData*/);
 
-		bool readSwapChain(const SwapChainVK& _swapChain, VkBuffer _buffer, VkDeviceMemory _memory, SwapChainReadFunc _func, const void* _userData = NULL)
+		bool readSwapChain(const SwapChainVK& _swapChain, VkBuffer _buffer, AllocationVK _memory, SwapChainReadFunc _func, const void* _userData = NULL)
 		{
 			if (isSwapChainReadable(_swapChain) )
 			{
@@ -3960,7 +3967,7 @@ VK_IMPORT_DEVICE
 				kick(true);
 
 				uint8_t* src;
-				VK_CHECK(vkMapMemory(m_device, _memory, 0, VK_WHOLE_SIZE, 0, (void**)&src) );
+				VK_CHECK(m_deviceAllocator.map(_memory, (void**)&src) );
 
 				if (_swapChain.m_colorFormat == TextureFormat::RGBA8)
 				{
@@ -3985,7 +3992,7 @@ VK_IMPORT_DEVICE
 					BX_FREE(g_allocator, dst);
 				}
 
-				vkUnmapMemory(m_device, _memory);
+				m_deviceAllocator.unmap(_memory);
 
 				readback.destroy();
 
@@ -4216,50 +4223,14 @@ VK_IMPORT_DEVICE
 			m_cmd.finish(_finishAll);
 		}
 
-		int32_t selectMemoryType(uint32_t _memoryTypeBits, uint32_t _propertyFlags, int32_t _startIndex = 0) const
+		VkResult createStagingBuffer(uint32_t _size, MemoryType::Enum _type, ::VkBuffer* _buffer, AllocationVK* _allocation, const void* _data = NULL)
 		{
-			for (int32_t ii = _startIndex, num = m_memoryProperties.memoryTypeCount; ii < num; ++ii)
-			{
-				const VkMemoryType& memType = m_memoryProperties.memoryTypes[ii];
-				if ( (0 != ( (1<<ii) & _memoryTypeBits) )
-				&& ( (memType.propertyFlags & _propertyFlags) == _propertyFlags) )
-				{
-					return ii;
-				}
-			}
+			BX_ASSERT(
+				     MemoryType::Upload   == _type
+				  || MemoryType::Download == _type
+				, "Staging buffer must be for upload or download."
+			);
 
-			BX_TRACE("Failed to find memory that supports flags 0x%08x.", _propertyFlags);
-			return -1;
-		}
-
-		VkResult allocateMemory(const VkMemoryRequirements* requirements, VkMemoryPropertyFlags propertyFlags, ::VkDeviceMemory* memory) const
-		{
-			VkMemoryAllocateInfo ma;
-			ma.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-			ma.pNext = NULL;
-			ma.allocationSize = requirements->size;
-
-			VkResult result = VK_ERROR_UNKNOWN;
-			int32_t searchIndex = -1;
-			do
-			{
-				searchIndex++;
-				searchIndex = selectMemoryType(requirements->memoryTypeBits, propertyFlags, searchIndex);
-
-				if (searchIndex >= 0)
-				{
-					ma.memoryTypeIndex = searchIndex;
-					result = vkAllocateMemory(m_device, &ma, m_allocatorCb, memory);
-				}
-			}
-			while (result != VK_SUCCESS
-			   &&  searchIndex >= 0);
-
-			return result;
-		}
-
-		VkResult createHostBuffer(uint32_t _size, VkMemoryPropertyFlags _flags, ::VkBuffer* _buffer, ::VkDeviceMemory* _memory, const void* _data = NULL)
-		{
 			VkResult result = VK_SUCCESS;
 
 			VkBufferCreateInfo bci;
@@ -4270,73 +4241,52 @@ VK_IMPORT_DEVICE
 			bci.queueFamilyIndexCount = 0;
 			bci.pQueueFamilyIndices = NULL;
 			bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-			bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+			bci.usage = 0
+				| (MemoryType::Upload   == _type ? VK_BUFFER_USAGE_TRANSFER_SRC_BIT : 0)
+				| (MemoryType::Download == _type ? VK_BUFFER_USAGE_TRANSFER_DST_BIT : 0)
+				;
 
 			result = vkCreateBuffer(m_device, &bci, m_allocatorCb, _buffer);
 			if (VK_SUCCESS != result)
 			{
-				BX_TRACE("Create host buffer error: vkCreateBuffer failed %d: %s.", result, getName(result) );
+				BX_TRACE("Create staging buffer error: vkCreateBuffer failed %d: %s.", result, getName(result) );
 				return result;
 			}
 
 			VkMemoryRequirements mr;
 			vkGetBufferMemoryRequirements(m_device, *_buffer, &mr);
 
-			result = allocateMemory(&mr, _flags, _memory);
-
-			if (VK_SUCCESS != result
-			&&  (_flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) )
-			{
-				result = allocateMemory(&mr, _flags & ~VK_MEMORY_PROPERTY_HOST_CACHED_BIT, _memory);
-			}
+			result = m_deviceAllocator.allocate(mr, _type, _allocation);
 
 			if (VK_SUCCESS != result)
 			{
-				BX_TRACE("Create host buffer error: vkAllocateMemory failed %d: %s.", result, getName(result) );
+				BX_TRACE("Create staging buffer error: allocate failed %d: %s.", result, getName(result) );
 				return result;
 			}
 
-			result = vkBindBufferMemory(m_device, *_buffer, *_memory, 0);
+			result = vkBindBufferMemory(m_device, *_buffer, _allocation->m_memory, _allocation->m_offset);
 			if (VK_SUCCESS != result)
 			{
-				BX_TRACE("Create host buffer error: vkBindBufferMemory failed %d: %s.", result, getName(result) );
+				BX_TRACE("Create staging buffer error: vkBindBufferMemory failed %d: %s.", result, getName(result) );
 				return result;
 			}
 
-			if (_data != NULL)
+			if (_data != NULL
+			&&  MemoryType::Upload == _type)
 			{
 				void* dst;
-				result = vkMapMemory(m_device, *_memory, 0, _size, 0, &dst);
+				result = m_deviceAllocator.map(*_allocation, &dst);
 				if (VK_SUCCESS != result)
 				{
-					BX_TRACE("Create host buffer error: vkMapMemory failed %d: %s.", result, getName(result) );
+					BX_TRACE("Create staging buffer error: map failed %d: %s.", result, getName(result) );
 					return result;
 				}
 
 				bx::memCopy(dst, _data, _size);
-				vkUnmapMemory(m_device, *_memory);
+				m_deviceAllocator.unmap(*_allocation);
 			}
 
 			return result;
-		}
-
-		VkResult createStagingBuffer(uint32_t _size, ::VkBuffer* _buffer, ::VkDeviceMemory* _memory, const void* _data = NULL)
-		{
-			const VkMemoryPropertyFlags flags = 0
-				| VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-				| VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-				;
-			return createHostBuffer(_size, flags, _buffer, _memory, _data);
-		}
-
-		VkResult createReadbackBuffer(uint32_t _size, ::VkBuffer* _buffer, ::VkDeviceMemory* _memory)
-		{
-			const VkMemoryPropertyFlags flags = 0
-				| VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-				| VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-				| VK_MEMORY_PROPERTY_HOST_CACHED_BIT
-				;
-			return createHostBuffer(_size, flags, _buffer, _memory, NULL);
 		}
 
 		VkAllocationCallbacks*   m_allocatorCb;
@@ -4345,9 +4295,8 @@ VK_IMPORT_DEVICE
 		VkPhysicalDevice m_physicalDevice;
 		uint32_t         m_instanceApiVersion;
 
-		VkPhysicalDeviceProperties       m_deviceProperties;
-		VkPhysicalDeviceMemoryProperties m_memoryProperties;
-		VkPhysicalDeviceFeatures         m_deviceFeatures;
+		VkPhysicalDeviceProperties m_deviceProperties;
+		VkPhysicalDeviceFeatures   m_deviceFeatures;
 
 		bool m_lineAASupport;
 		bool m_borderColorSupport;
@@ -4365,6 +4314,8 @@ VK_IMPORT_DEVICE
 		uint32_t        m_numFramesInFlight;
 		CommandQueueVK  m_cmd;
 		VkCommandBuffer m_commandBuffer;
+
+		MemoryAllocatorVK m_deviceAllocator;
 
 		VkDevice m_device;
 		uint32_t m_globalQueueFamily;
@@ -4403,7 +4354,7 @@ VK_IMPORT_DEVICE
 		bool m_wireframe;
 
 		VkBuffer m_captureBuffer;
-		VkDeviceMemory m_captureMemory;
+		AllocationVK m_captureMemory;
 		uint32_t m_captureSize;
 
 		TextVideoMem m_textVideoMem;
@@ -4492,6 +4443,208 @@ VK_DESTROY
 		s_renderVK->release(_obj);
 	}
 
+	void MemoryAllocatorVK::init()
+	{
+		const VkPhysicalDevice physicalDevice = s_renderVK->m_physicalDevice;
+
+		bx::memSet(&m_memoryProperties, 0, sizeof(m_memoryProperties) );
+		vkGetPhysicalDeviceMemoryProperties(physicalDevice, &m_memoryProperties);
+	}
+
+	void MemoryAllocatorVK::shutdown()
+	{
+
+	}
+
+	VkResult MemoryAllocatorVK::allocate(const VkMemoryRequirements& _requirements, MemoryType::Enum _type, AllocationVK* _allocation)
+	{
+		const VkDevice device = s_renderVK->m_device;
+		const VkAllocationCallbacks* allocatorCb = s_renderVK->m_allocatorCb;
+
+		VkMemoryPropertyFlags propertyFlags[2];
+		uint8_t propertyFlagsCount = 0;
+
+		switch (_type)
+		{
+		case MemoryType::Upload:
+			propertyFlags[propertyFlagsCount++] = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+			break;
+		case MemoryType::Download:
+			propertyFlags[propertyFlagsCount++] = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+			propertyFlags[propertyFlagsCount++] = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+			break;
+		case MemoryType::Device:
+			propertyFlags[propertyFlagsCount++] = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+			break;
+		case MemoryType::Shared:
+			propertyFlags[propertyFlagsCount++] = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+			propertyFlags[propertyFlagsCount++] = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+			break;
+		}
+
+		VkMemoryAllocateInfo ma;
+		ma.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		ma.pNext = NULL;
+		ma.allocationSize = _requirements.size;
+
+		_allocation->m_memory = VK_NULL_HANDLE;
+
+		VkResult result = VK_ERROR_UNKNOWN;
+
+		for (uint8_t ii = 0; ii < propertyFlagsCount; ++ii)
+		{
+			int32_t searchIndex = -1;
+			do
+			{
+				searchIndex++;
+				searchIndex = selectMemoryType(_requirements.memoryTypeBits, propertyFlags[ii], searchIndex);
+
+				if (searchIndex >= 0)
+				{
+					ma.memoryTypeIndex = searchIndex;
+					result = vkAllocateMemory(device, &ma, allocatorCb, &_allocation->m_memory);
+					
+					_allocation->m_offset = 0;
+					_allocation->m_size = _requirements.size;
+					_allocation->m_properties = propertyFlags[ii];
+				}
+			}
+			while (result != VK_SUCCESS
+			&&     searchIndex >= 0);
+
+			if (VK_SUCCESS == result)
+			{
+				break;
+			}
+		}
+
+		return result;
+	}
+
+	void MemoryAllocatorVK::release(AllocationVK& _allocation)
+	{
+		// TODO mark chunk as available in + m_numFramesInFlight frames
+		// TODO unmap if mapped
+
+		BX_ASSERT(0 == _allocation.m_offset, "");
+
+		s_renderVK->release(_allocation.m_memory);
+	}
+
+	VkResult MemoryAllocatorVK::map(const AllocationVK& _allocation, void** _pointer)
+	{
+		// TODO alignment
+		// TODO reference-counting
+
+		BX_ASSERT(0 == _allocation.m_offset, "");
+		BX_ASSERT(0 != (_allocation.m_properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT), "Memory to map must be host-visible.");
+
+		const VkDevice device = s_renderVK->m_device;
+
+		VkResult result = vkMapMemory(device, _allocation.m_memory, _allocation.m_offset, _allocation.m_size, 0, _pointer);
+		if (VK_SUCCESS != result)
+		{
+			BX_TRACE("Map memory error: vkMapMemory failed %d: %s.", result, getName(result) );
+			return result;
+		}
+
+		return result;
+	}
+
+	void MemoryAllocatorVK::unmap(const AllocationVK& _allocation)
+	{
+		BX_ASSERT(0 == _allocation.m_offset, "");
+
+		const VkDevice device = s_renderVK->m_device;
+		vkUnmapMemory(device, _allocation.m_memory);
+	}
+
+	VkResult MemoryAllocatorVK::flush(const AllocationVK& _allocation, VkDeviceSize _offset)
+	{
+		BX_ASSERT(0 == _allocation.m_offset, "");
+		BX_ASSERT(0 != (_allocation.m_properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT), "Memory to flush must be host-visible.");
+
+		if (_allocation.m_properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+		{
+			return VK_SUCCESS;
+		}
+
+		const VkDevice device = s_renderVK->m_device;
+		const VkPhysicalDeviceLimits& deviceLimits = s_renderVK->m_deviceProperties.limits;
+
+		const VkDeviceSize align = deviceLimits.nonCoherentAtomSize;
+		// TODO custom align function for > 32-bits
+		const VkDeviceSize size  = bx::min<VkDeviceSize>(bx::strideAlign(_offset, align), _allocation.m_size);
+
+		VkMappedMemoryRange range;
+		range.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+		range.pNext  = NULL;
+		range.memory = _allocation.m_memory;
+		range.offset = _allocation.m_offset;
+		range.size   = size;
+		return vkFlushMappedMemoryRanges(device, 1, &range);
+	}
+
+	VkResult MemoryAllocatorVK::invalidate(const AllocationVK& _allocation, VkDeviceSize _offset)
+	{
+		BX_UNUSED(_allocation, _offset);
+
+		BX_ASSERT(0 == _allocation.m_offset, "");
+		BX_ASSERT(0 != (_allocation.m_properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT), "Memory to invalidate must be host-visible.");
+
+		if (_allocation.m_properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+		{
+			return VK_SUCCESS;
+		}
+
+		// TODO
+
+		return VK_SUCCESS;
+	}
+
+	bool MemoryAllocatorVK::updateMemoryBudget()
+	{
+		if (s_extension[Extension::EXT_memory_budget].m_supported)
+		{
+			const VkPhysicalDevice physicalDevice = s_renderVK->m_physicalDevice;
+
+			VkPhysicalDeviceMemoryBudgetPropertiesEXT dmbp;
+			dmbp.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
+			dmbp.pNext = NULL;
+
+			VkPhysicalDeviceMemoryProperties2 pdmp2;
+			pdmp2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
+			pdmp2.pNext = &dmbp;
+
+			vkGetPhysicalDeviceMemoryProperties2KHR(physicalDevice, &pdmp2);
+
+			bx::memCopy(heapUsage,  dmbp.heapUsage,  sizeof(VkDeviceSize) * VK_MAX_MEMORY_HEAPS);
+			bx::memCopy(heapBudget, dmbp.heapBudget, sizeof(VkDeviceSize) * VK_MAX_MEMORY_HEAPS);
+
+			return true;
+		}
+
+		// TODO calculate usage from allocations
+
+		return false;
+	}
+
+	int32_t MemoryAllocatorVK::selectMemoryType(uint32_t _memoryTypeBits, uint32_t _propertyFlags, int32_t _startIndex)
+	{
+		for (int32_t ii = _startIndex, num = m_memoryProperties.memoryTypeCount; ii < num; ++ii)
+		{
+			const VkMemoryType& memType = m_memoryProperties.memoryTypes[ii];
+			if ( (0 != ( (1<<ii) & _memoryTypeBits) )
+			&& ( (memType.propertyFlags & _propertyFlags) == _propertyFlags) )
+			{
+				return ii;
+			}
+		}
+
+		BX_TRACE("Failed to find memory that supports flags 0x%08x.", _propertyFlags);
+		return -1;
+	}
+
 	void ScratchBufferVK::create(uint32_t _size, uint32_t _count)
 	{
 		const VkAllocationCallbacks* allocatorCb = s_renderVK->m_allocatorCb;
@@ -4520,34 +4673,23 @@ VK_DESTROY
 			) );
 
 		VkMemoryRequirements mr;
-		vkGetBufferMemoryRequirements(
-			  device
-			, m_buffer
-			, &mr
-			);
+		vkGetBufferMemoryRequirements(device, m_buffer, &mr);
 
-		VkMemoryPropertyFlags flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-		VkResult result = s_renderVK->allocateMemory(&mr, flags, &m_deviceMem);
-
-		if (VK_SUCCESS != result)
-		{
-			flags &= ~VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-			VK_CHECK(s_renderVK->allocateMemory(&mr, flags, &m_deviceMem) );
-		}
+		VK_CHECK(s_renderVK->m_deviceAllocator.allocate(mr, MemoryType::Shared, &m_deviceMem) );
 
 		m_size = (uint32_t)mr.size;
 		m_pos  = 0;
 
-		VK_CHECK(vkBindBufferMemory(device, m_buffer, m_deviceMem, 0) );
+		VK_CHECK(vkBindBufferMemory(device, m_buffer, m_deviceMem.m_memory, m_deviceMem.m_offset) );
 
-		VK_CHECK(vkMapMemory(device, m_deviceMem, 0, m_size, 0, (void**)&m_data) );
+		VK_CHECK(s_renderVK->m_deviceAllocator.map(m_deviceMem, (void**)&m_data) );
 	}
 
 	void ScratchBufferVK::destroy()
 	{
 		reset();
 
-		vkUnmapMemory(s_renderVK->m_device, m_deviceMem);
+		s_renderVK->m_deviceAllocator.unmap(m_deviceMem);
 
 		s_renderVK->release(m_buffer);
 		s_renderVK->release(m_deviceMem);
@@ -4580,19 +4722,7 @@ VK_DESTROY
 
 	void ScratchBufferVK::flush()
 	{
-		const VkPhysicalDeviceLimits& deviceLimits = s_renderVK->m_deviceProperties.limits;
-		VkDevice device = s_renderVK->m_device;
-
-		const uint32_t align = uint32_t(deviceLimits.nonCoherentAtomSize);
-		const uint32_t size  = bx::min(bx::strideAlign(m_pos, align), m_size);
-
-		VkMappedMemoryRange range;
-		range.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-		range.pNext  = NULL;
-		range.memory = m_deviceMem;
-		range.offset = 0;
-		range.size   = size;
-		VK_CHECK(vkFlushMappedMemoryRanges(device, 1, &range) );
+		s_renderVK->m_deviceAllocator.flush(m_deviceMem);
 	}
 
 	void BufferVK::create(VkCommandBuffer _commandBuffer, uint32_t _size, void* _data, uint16_t _flags, bool _vertex, uint32_t _stride)
@@ -4628,9 +4758,9 @@ VK_DESTROY
 		VkMemoryRequirements mr;
 		vkGetBufferMemoryRequirements(device, m_buffer, &mr);
 
-		VK_CHECK(s_renderVK->allocateMemory(&mr, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &m_deviceMem) );
+		VK_CHECK(s_renderVK->m_deviceAllocator.allocate(mr, MemoryType::Device, &m_deviceMem) );
 
-		VK_CHECK(vkBindBufferMemory(device, m_buffer, m_deviceMem, 0) );
+		VK_CHECK(vkBindBufferMemory(device, m_buffer, m_deviceMem.m_memory, m_deviceMem.m_offset) );
 
 		if (!m_dynamic)
 		{
@@ -4643,8 +4773,8 @@ VK_DESTROY
 		BX_UNUSED(_discard);
 
 		VkBuffer stagingBuffer;
-		VkDeviceMemory stagingMem;
-		VK_CHECK(s_renderVK->createStagingBuffer(_size, &stagingBuffer, &stagingMem, _data) );
+		AllocationVK stagingMemory;
+		VK_CHECK(s_renderVK->createStagingBuffer(_size, MemoryType::Upload, &stagingBuffer, &stagingMemory, _data) );
 
 		VkBufferCopy region;
 		region.srcOffset = 0;
@@ -4659,7 +4789,7 @@ VK_DESTROY
 			);
 
 		s_renderVK->release(stagingBuffer);
-		s_renderVK->release(stagingMem);
+		s_renderVK->release(stagingMemory);
 	}
 
 	void BufferVK::destroy()
@@ -5248,18 +5378,17 @@ VK_DESTROY
 		vkCmdResetQueryPool(commandBuffer, m_queryPool, 0, count);
 
 		const uint32_t size = count * sizeof(uint64_t);
-		result = s_renderVK->createReadbackBuffer(size, &m_readback, &m_readbackMemory);
+		result = s_renderVK->createStagingBuffer(size, MemoryType::Download, &m_readback, &m_readbackMemory);
 
 		if (VK_SUCCESS != result)
 		{
 			return result;
 		}
 
-		result = vkMapMemory(device, m_readbackMemory, 0, VK_WHOLE_SIZE, 0, (void**)&m_queryResult);
+		result = s_renderVK->m_deviceAllocator.map(m_readbackMemory, (void**)&m_queryResult);
 
 		if (VK_SUCCESS != result)
 		{
-			BX_TRACE("Create timer query error: vkMapMemory failed %d: %s.", result, getName(result) );
 			return result;
 		}
 
@@ -5277,10 +5406,10 @@ VK_DESTROY
 
 	void TimerQueryVK::shutdown()
 	{
-		vkDestroy(m_queryPool);
-		vkDestroy(m_readback);
-		vkUnmapMemory(s_renderVK->m_device, m_readbackMemory);
-		vkDestroy(m_readbackMemory);
+		release(m_queryPool);
+		release(m_readback);
+		s_renderVK->m_deviceAllocator.unmap(m_readbackMemory);
+		s_renderVK->release(m_readbackMemory);
 	}
 
 	uint32_t TimerQueryVK::begin(uint32_t _resultIdx)
@@ -5398,18 +5527,17 @@ VK_DESTROY
 		vkCmdResetQueryPool(commandBuffer, m_queryPool, 0, count);
 
 		const uint32_t size = count * sizeof(uint32_t);
-		result = s_renderVK->createReadbackBuffer(size, &m_readback, &m_readbackMemory);
+		result = s_renderVK->createStagingBuffer(size, MemoryType::Download, &m_readback, &m_readbackMemory);
 
 		if (VK_SUCCESS != result)
 		{
 			return result;
 		}
 
-		result = vkMapMemory(device, m_readbackMemory, 0, VK_WHOLE_SIZE, 0, (void**)&m_queryResult);
+		result = s_renderVK->m_deviceAllocator.map(m_readbackMemory, (void**)&m_queryResult);
 
 		if (VK_SUCCESS != result)
 		{
-			BX_TRACE("Create occlusion query error: vkMapMemory failed %d: %s.", result, getName(result) );
 			return result;
 		}
 
@@ -5420,10 +5548,10 @@ VK_DESTROY
 
 	void OcclusionQueryVK::shutdown()
 	{
-		vkDestroy(m_queryPool);
-		vkDestroy(m_readback);
-		vkUnmapMemory(s_renderVK->m_device, m_readbackMemory);
-		vkDestroy(m_readbackMemory);
+		release(m_queryPool);
+		release(m_readback);
+		s_renderVK->m_deviceAllocator.unmap(m_readbackMemory);
+		s_renderVK->release(m_readbackMemory);
 	}
 
 	void OcclusionQueryVK::begin(OcclusionQueryHandle _handle)
@@ -5591,7 +5719,7 @@ VK_DESTROY
 			);
 	}
 
-	void ReadbackVK::readback(VkDeviceMemory _memory, VkDeviceSize _offset, void* _data, uint8_t _mip) const
+	void ReadbackVK::readback(AllocationVK& _memory, void* _data, uint8_t _mip) const
 	{
 		if (m_image == VK_NULL_HANDLE)
 		{
@@ -5602,8 +5730,7 @@ VK_DESTROY
 		uint32_t rowPitch = pitch(_mip);
 
 		uint8_t* src;
-		VK_CHECK(vkMapMemory(s_renderVK->m_device, _memory, 0, VK_WHOLE_SIZE, 0, (void**)&src) );
-		src += _offset;
+		VK_CHECK(s_renderVK->m_deviceAllocator.map(_memory, (void**)&src) );
 		uint8_t* dst = (uint8_t*)_data;
 
 		for (uint32_t yy = 0; yy < mipHeight; ++yy)
@@ -5613,7 +5740,7 @@ VK_DESTROY
 			dst += rowPitch;
 		}
 
-		vkUnmapMemory(s_renderVK->m_device, _memory);
+		s_renderVK->m_deviceAllocator.unmap(_memory);
 	}
 
 	VkResult TextureVK::create(VkCommandBuffer _commandBuffer, uint32_t _width, uint32_t _height, uint64_t _flags, VkFormat _format)
@@ -5716,14 +5843,14 @@ VK_DESTROY
 		VkMemoryRequirements imageMemReq;
 		vkGetImageMemoryRequirements(device, m_textureImage, &imageMemReq);
 
-		result = s_renderVK->allocateMemory(&imageMemReq, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &m_textureDeviceMem);
+		result = s_renderVK->m_deviceAllocator.allocate(imageMemReq, MemoryType::Device, &m_textureDeviceMem);
 		if (VK_SUCCESS != result)
 		{
-			BX_TRACE("Create texture image error: allocateMemory failed %d: %s.", result, getName(result) );
+			BX_TRACE("Create texture image error: allocate failed %d: %s.", result, getName(result) );
 			return result;
 		}
 
-		result = vkBindImageMemory(device, m_textureImage, m_textureDeviceMem, 0);
+		result = vkBindImageMemory(device, m_textureImage, m_textureDeviceMem.m_memory, m_textureDeviceMem.m_offset);
 		if (VK_SUCCESS != result)
 		{
 			BX_TRACE("Create texture image error: vkBindImageMemory failed %d: %s.", result, getName(result) );
@@ -5759,14 +5886,14 @@ VK_DESTROY
 			VkMemoryRequirements imageMemReq_resolve;
 			vkGetImageMemoryRequirements(device, m_singleMsaaImage, &imageMemReq_resolve);
 
-			result = s_renderVK->allocateMemory(&imageMemReq_resolve, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &m_singleMsaaDeviceMem);
+			result = s_renderVK->m_deviceAllocator.allocate(imageMemReq_resolve, MemoryType::Device, &m_singleMsaaDeviceMem);
 			if (VK_SUCCESS != result)
 			{
-				BX_TRACE("Create texture image error: allocateMemory failed %d: %s.", result, getName(result) );
+				BX_TRACE("Create texture image error: allocate failed %d: %s.", result, getName(result) );
 				return result;
 			}
 
-			result = vkBindImageMemory(device, m_singleMsaaImage, m_singleMsaaDeviceMem, 0);
+			result = vkBindImageMemory(device, m_singleMsaaImage, m_singleMsaaDeviceMem.m_memory, m_singleMsaaDeviceMem.m_offset);
 			if (VK_SUCCESS != result)
 			{
 				BX_TRACE("Create texture image error: vkBindImageMemory failed %d: %s.", result, getName(result) );
@@ -6006,21 +6133,12 @@ VK_DESTROY
 
 			if (totalMemSize > 0)
 			{
-				const VkDevice device = s_renderVK->m_device;
-
 				VkBuffer stagingBuffer;
-				VkDeviceMemory stagingDeviceMem;
-				VK_CHECK(s_renderVK->createStagingBuffer(totalMemSize, &stagingBuffer, &stagingDeviceMem) );
+				AllocationVK stagingMemory;
+				VK_CHECK(s_renderVK->createStagingBuffer(totalMemSize, MemoryType::Upload, &stagingBuffer, &stagingMemory) );
 
 				uint8_t* mappedMemory;
-				VK_CHECK(vkMapMemory(
-					  device
-					, stagingDeviceMem
-					, 0
-					, totalMemSize
-					, 0
-					, (void**)&mappedMemory
-					) );
+				VK_CHECK(s_renderVK->m_deviceAllocator.map(stagingMemory, (void**)&mappedMemory) );
 
 				// copy image to staging buffer
 				for (uint32_t ii = 0; ii < numSrd; ++ii)
@@ -6029,12 +6147,12 @@ VK_DESTROY
 					mappedMemory += imageInfos[ii].size;
 				}
 
-				vkUnmapMemory(device, stagingDeviceMem);
+				s_renderVK->m_deviceAllocator.unmap(stagingMemory);
 
 				copyBufferToTexture(_commandBuffer, stagingBuffer, numSrd, bufferCopyInfo);
 
 				s_renderVK->release(stagingBuffer);
-				s_renderVK->release(stagingDeviceMem);
+				s_renderVK->release(stagingMemory);
 			}
 			else
 			{
@@ -6101,9 +6219,9 @@ VK_DESTROY
 			data = temp;
 		}
 
-		VkBuffer stagingBuffer = VK_NULL_HANDLE;
-		VkDeviceMemory stagingDeviceMem = VK_NULL_HANDLE;
-		VK_CHECK(s_renderVK->createStagingBuffer(size, &stagingBuffer, &stagingDeviceMem, data) );
+		VkBuffer stagingBuffer;
+		AllocationVK stagingMemory;
+		VK_CHECK(s_renderVK->createStagingBuffer(size, MemoryType::Upload, &stagingBuffer, &stagingMemory, data) );
 
 		VkBufferImageCopy region;
 		region.bufferOffset      = 0;
@@ -6119,7 +6237,7 @@ VK_DESTROY
 		copyBufferToTexture(_commandBuffer, stagingBuffer, 1, &region);
 
 		s_renderVK->release(stagingBuffer);
-		s_renderVK->release(stagingDeviceMem);
+		s_renderVK->release(stagingMemory);
 
 		if (NULL != temp)
 		{
@@ -7854,19 +7972,20 @@ VK_DESTROY
 			switch (resource.m_type)
 			{
 			case VK_OBJECT_TYPE_BUFFER:                destroy<VkBuffer             >(resource.m_handle); break;
-			case VK_OBJECT_TYPE_IMAGE_VIEW:            destroy<VkImageView          >(resource.m_handle); break;
-			case VK_OBJECT_TYPE_IMAGE:                 destroy<VkImage              >(resource.m_handle); break;
-			case VK_OBJECT_TYPE_FRAMEBUFFER:           destroy<VkFramebuffer        >(resource.m_handle); break;
-			case VK_OBJECT_TYPE_PIPELINE_LAYOUT:       destroy<VkPipelineLayout     >(resource.m_handle); break;
-			case VK_OBJECT_TYPE_PIPELINE:              destroy<VkPipeline           >(resource.m_handle); break;
 			case VK_OBJECT_TYPE_DESCRIPTOR_SET:        destroy<VkDescriptorSet      >(resource.m_handle); break;
 			case VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT: destroy<VkDescriptorSetLayout>(resource.m_handle); break;
+			case VK_OBJECT_TYPE_DEVICE_MEMORY:         destroy<VkDeviceMemory       >(resource.m_handle); break;
+			case VK_OBJECT_TYPE_FRAMEBUFFER:           destroy<VkFramebuffer        >(resource.m_handle); break;
+			case VK_OBJECT_TYPE_IMAGE:                 destroy<VkImage              >(resource.m_handle); break;
+			case VK_OBJECT_TYPE_IMAGE_VIEW:            destroy<VkImageView          >(resource.m_handle); break;
+			case VK_OBJECT_TYPE_PIPELINE:              destroy<VkPipeline           >(resource.m_handle); break;
+			case VK_OBJECT_TYPE_PIPELINE_LAYOUT:       destroy<VkPipelineLayout     >(resource.m_handle); break;
+			case VK_OBJECT_TYPE_QUERY_POOL:            destroy<VkQueryPool          >(resource.m_handle); break;
 			case VK_OBJECT_TYPE_RENDER_PASS:           destroy<VkRenderPass         >(resource.m_handle); break;
 			case VK_OBJECT_TYPE_SAMPLER:               destroy<VkSampler            >(resource.m_handle); break;
 			case VK_OBJECT_TYPE_SEMAPHORE:             destroy<VkSemaphore          >(resource.m_handle); break;
 			case VK_OBJECT_TYPE_SURFACE_KHR:           destroy<VkSurfaceKHR         >(resource.m_handle); break;
 			case VK_OBJECT_TYPE_SWAPCHAIN_KHR:         destroy<VkSwapchainKHR       >(resource.m_handle); break;
-			case VK_OBJECT_TYPE_DEVICE_MEMORY:         destroy<VkDeviceMemory       >(resource.m_handle); break;
 			default:
 				BX_ASSERT(false, "Invalid resource type: %d", resource.m_type);
 				break;
@@ -8807,30 +8926,25 @@ VK_DESTROY
 
 		const int64_t timerFreq = bx::getHPFrequency();
 
-		VkPhysicalDeviceMemoryBudgetPropertiesEXT dmbp;
-		dmbp.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
-		dmbp.pNext = NULL;
-
 		int64_t gpuMemoryAvailable = -INT64_MAX;
 		int64_t gpuMemoryUsed      = -INT64_MAX;
 
-		if (s_extension[Extension::EXT_memory_budget].m_supported)
+		const bool hasBudgetData = m_deviceAllocator.updateMemoryBudget();
+
+		if (hasBudgetData)
 		{
-			VkPhysicalDeviceMemoryProperties2 pdmp2;
-			pdmp2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
-			pdmp2.pNext = &dmbp;
-
-			vkGetPhysicalDeviceMemoryProperties2KHR(m_physicalDevice, &pdmp2);
-
 			gpuMemoryAvailable = 0;
 			gpuMemoryUsed      = 0;
 
-			for (uint32_t ii = 0; ii < m_memoryProperties.memoryHeapCount; ++ii)
+			const uint32_t heapCount = m_deviceAllocator.m_memoryProperties.memoryHeapCount;
+			const VkMemoryHeap* heaps = m_deviceAllocator.m_memoryProperties.memoryHeaps;
+
+			for (uint32_t ii = 0; ii < heapCount; ++ii)
 			{
-				if (!!(m_memoryProperties.memoryHeaps[ii].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) )
+				if (heaps[ii].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
 				{
-					gpuMemoryAvailable += dmbp.heapBudget[ii];
-					gpuMemoryUsed += dmbp.heapUsage[ii];
+					gpuMemoryAvailable += m_deviceAllocator.heapBudget[ii];
+					gpuMemoryUsed      += m_deviceAllocator.heapUsage[ii];
 				}
 			}
 		}
@@ -8885,25 +8999,32 @@ VK_DESTROY
 					, getName(pdp.deviceType)
 					);
 
-				if (0 <= gpuMemoryAvailable && 0 <= gpuMemoryUsed)
+				const uint32_t heapCount = m_deviceAllocator.m_memoryProperties.memoryHeapCount;
+				const VkMemoryHeap* heaps = m_deviceAllocator.m_memoryProperties.memoryHeaps;
+
+				for (uint32_t ii = 0; ii < heapCount; ++ii)
 				{
-					for (uint32_t ii = 0; ii < m_memoryProperties.memoryHeapCount; ++ii)
+					char budget[16];
+					char usage[16] = "--";
+
+					if (hasBudgetData)
 					{
-						char budget[16];
-						bx::prettify(budget, BX_COUNTOF(budget), dmbp.heapBudget[ii]);
-
-						char usage[16];
-						bx::prettify(usage, BX_COUNTOF(usage), dmbp.heapUsage[ii]);
-
-						const bool local = (!!(m_memoryProperties.memoryHeaps[ii].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) );
-
-						tvm.printf(0, pos++, 0x8f, " Memory %d %s - Budget: %12s, Usage: %12s"
-							, ii
-							, local ? "(local)    " : "(non-local)"
-							, budget
-							, usage
-							);
+						bx::prettify(budget, BX_COUNTOF(budget), m_deviceAllocator.heapBudget[ii]);
+						bx::prettify(usage,  BX_COUNTOF(usage),  m_deviceAllocator.heapUsage[ii]);
 					}
+					else
+					{
+						bx::prettify(budget, BX_COUNTOF(budget), heaps[ii].size);
+					}
+
+					const bool local = (!!(heaps[ii].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) );
+
+					tvm.printf(0, pos++, 0x8f, " Memory %d %s - Budget: %12s, Usage: %12s"
+						, ii
+						, local ? "(local)    " : "(non-local)"
+						, budget
+						, usage
+						);
 				}
 
 				pos = 10;
