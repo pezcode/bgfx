@@ -312,6 +312,8 @@ VK_IMPORT_DEVICE
 			EXT_line_rasterization,
 			EXT_shader_viewport_index_layer,
 			EXT_custom_border_color,
+			KHR_get_memory_requirements2,
+			KHR_dedicated_allocation,
 
 			Count
 		};
@@ -336,6 +338,8 @@ VK_IMPORT_DEVICE
 		{ "VK_EXT_line_rasterization",              1, false, false, true                                                         , Layer::Count },
 		{ "VK_EXT_shader_viewport_index_layer",     1, false, false, true                                                         , Layer::Count },
 		{ "VK_EXT_custom_border_color",             1, false, false, true                                                         , Layer::Count },
+		{ "VK_KHR_get_memory_requirements2",        1, false, false, true                                                         , Layer::Count },
+		{ "VK_KHR_dedicated_allocation",            1, false, false, true                                                         , Layer::Count },
 	};
 	BX_STATIC_ASSERT(Extension::Count == BX_COUNTOF(s_extension) );
 
@@ -4451,7 +4455,6 @@ VK_DESTROY
 
 	}
 
-	VkResult MemoryAllocatorVK::allocate(const VkMemoryRequirements& _requirements, MemoryType::Enum _type, AllocationVK* _allocation)
 	VkResult MemoryAllocatorVK::createBuffer(const VkBufferCreateInfo& _info, MemoryType::Enum _type, ::VkBuffer* _buffer, AllocationVK* _allocation)
 	{
 		VkResult result = VK_SUCCESS;
@@ -4472,10 +4475,48 @@ VK_DESTROY
 			return result;
 		}
 
+		bool dedicatedAllocation = false;
 		VkMemoryRequirements mr;
-		vkGetBufferMemoryRequirements(device, *_buffer, &mr);
+		VkMemoryDedicatedAllocateInfoKHR mdai;
 
-		result = allocate(mr, _type, _allocation);
+		if (s_extension[Extension::KHR_dedicated_allocation].m_supported)
+		{
+			VkBufferMemoryRequirementsInfo2KHR bmri2;
+			bmri2.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2_KHR;
+			bmri2.pNext = NULL;
+			bmri2.buffer = *_buffer;
+
+			VkMemoryDedicatedRequirementsKHR mdr;
+			mdr.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS_KHR;
+			mdr.pNext = NULL;
+
+			VkMemoryRequirements2KHR mr2;
+			mr2.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2_KHR;
+			mr2.pNext = &mdr;
+
+			vkGetBufferMemoryRequirements2KHR(device, &bmri2, &mr2);
+
+			mr = mr2.memoryRequirements;
+			dedicatedAllocation = false
+				|| mdr.requiresDedicatedAllocation
+				|| mdr.prefersDedicatedAllocation
+				;
+
+			mdai.sType  = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO_KHR;
+			mdai.pNext  = NULL;
+			mdai.buffer = *_buffer;
+			mdai.image  = VK_NULL_HANDLE;
+		}
+		else
+		{
+			vkGetBufferMemoryRequirements(device, *_buffer, &mr);
+		}
+
+		result = allocate(mr
+			, dedicatedAllocation ? &mdai : NULL
+			, _type
+			, _allocation
+			);
 
 		if (VK_SUCCESS != result)
 		{
@@ -4514,10 +4555,48 @@ VK_DESTROY
 			return result;
 		}
 
+		bool dedicatedAllocation = false;
 		VkMemoryRequirements mr;
-		vkGetImageMemoryRequirements(device, *_image, &mr);
+		VkMemoryDedicatedAllocateInfoKHR mdai;
 
-		result = allocate(mr, _type, _allocation);
+		if (s_extension[Extension::KHR_dedicated_allocation].m_supported)
+		{
+			VkImageMemoryRequirementsInfo2KHR imri2;
+			imri2.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2_KHR;
+			imri2.pNext = NULL;
+			imri2.image = *_image;
+
+			VkMemoryDedicatedRequirementsKHR mdr;
+			mdr.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS_KHR;
+			mdr.pNext = NULL;
+
+			VkMemoryRequirements2KHR mr2;
+			mr2.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2_KHR;
+			mr2.pNext = &mdr;
+
+			vkGetImageMemoryRequirements2KHR(device, &imri2, &mr2);
+
+			mr = mr2.memoryRequirements;
+			dedicatedAllocation = false
+				|| mdr.requiresDedicatedAllocation
+				|| mdr.prefersDedicatedAllocation
+				;
+
+			mdai.sType  = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO_KHR;
+			mdai.pNext  = NULL;
+			mdai.buffer = VK_NULL_HANDLE;
+			mdai.image  = *_image;
+		}
+		else
+		{
+			vkGetImageMemoryRequirements(device, *_image, &mr);
+		}
+
+		result = allocate(mr
+			, dedicatedAllocation ? &mdai : NULL
+			, _type
+			, _allocation
+			);
 
 		if (VK_SUCCESS != result)
 		{
@@ -4536,6 +4615,7 @@ VK_DESTROY
 		return result;
 	}
 
+	VkResult MemoryAllocatorVK::allocate(const VkMemoryRequirements& _requirements, const VkMemoryDedicatedAllocateInfoKHR* _dedicatedInfo, MemoryType::Enum _type, AllocationVK* _allocation)
 	{
 		// TODO align and round size of host-visible, non-coherent memory up to nonCoherentAtomSize
 
@@ -4569,6 +4649,11 @@ VK_DESTROY
 		mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
 		mai.pNext = NULL;
 		mai.allocationSize = _requirements.size;
+
+		if (NULL != _dedicatedInfo)
+		{
+			mai.pNext = _dedicatedInfo;
+		}		
 
 		_allocation->m_memory = VK_NULL_HANDLE;
 
