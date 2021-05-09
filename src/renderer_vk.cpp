@@ -3968,6 +3968,7 @@ VK_IMPORT_DEVICE
 
 				uint8_t* src;
 				VK_CHECK(m_deviceAllocator.map(_memory, (void**)&src) );
+				VK_CHECK(m_deviceAllocator.invalidate(_memory) );
 
 				if (_swapChain.m_colorFormat == TextureFormat::RGBA8)
 				{
@@ -4283,6 +4284,14 @@ VK_IMPORT_DEVICE
 				}
 
 				bx::memCopy(dst, _data, _size);
+
+				result = m_deviceAllocator.flush(*_allocation);
+				if (VK_SUCCESS != result)
+				{
+					BX_TRACE("Create staging buffer error: flush failed %d: %s.", result, getName(result) );
+					return result;
+				}
+
 				m_deviceAllocator.unmap(*_allocation);
 			}
 
@@ -4449,6 +4458,9 @@ VK_DESTROY
 
 		bx::memSet(&m_memoryProperties, 0, sizeof(m_memoryProperties) );
 		vkGetPhysicalDeviceMemoryProperties(physicalDevice, &m_memoryProperties);
+
+		const VkPhysicalDeviceLimits& limits = s_renderVK->m_deviceProperties.limits;
+		m_mapAlignment = limits.nonCoherentAtomSize;
 	}
 
 	void MemoryAllocatorVK::shutdown()
@@ -4458,20 +4470,24 @@ VK_DESTROY
 
 	VkResult MemoryAllocatorVK::allocate(const VkMemoryRequirements& _requirements, MemoryType::Enum _type, AllocationVK* _allocation)
 	{
+		// TODO align and round size of host-visible, non-coherent memory up to nonCoherentAtomSize
+
 		const VkDevice device = s_renderVK->m_device;
 		const VkAllocationCallbacks* allocatorCb = s_renderVK->m_allocatorCb;
 
-		VkMemoryPropertyFlags propertyFlags[2];
+		VkMemoryPropertyFlags propertyFlags[3];
 		uint8_t propertyFlagsCount = 0;
 
 		switch (_type)
 		{
 		case MemoryType::Upload:
 			propertyFlags[propertyFlagsCount++] = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+			propertyFlags[propertyFlagsCount++] = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
 			break;
 		case MemoryType::Download:
 			propertyFlags[propertyFlagsCount++] = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
 			propertyFlags[propertyFlagsCount++] = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+			propertyFlags[propertyFlagsCount++] = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
 			break;
 		case MemoryType::Device:
 			propertyFlags[propertyFlagsCount++] = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
@@ -4531,75 +4547,70 @@ VK_DESTROY
 		s_renderVK->release(_allocation.m_memory);
 	}
 
-	VkResult MemoryAllocatorVK::map(const AllocationVK& _allocation, void** _pointer)
+	VkResult MemoryAllocatorVK::map(const AllocationVK& _allocation, void** _pointer, VkDeviceSize _offset)
 	{
-		// TODO alignment
 		// TODO reference-counting
 
 		BX_ASSERT(0 == _allocation.m_offset, "");
 		BX_ASSERT(0 != (_allocation.m_properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT), "Memory to map must be host-visible.");
 
 		const VkDevice device = s_renderVK->m_device;
+		const VkDeviceSize size = _allocation.m_size; // TODO memory size, not block size
 
-		VkResult result = vkMapMemory(device, _allocation.m_memory, _allocation.m_offset, _allocation.m_size, 0, _pointer);
+		VkResult result = vkMapMemory(device, _allocation.m_memory, 0, size, 0, _pointer);
 		if (VK_SUCCESS != result)
 		{
 			BX_TRACE("Map memory error: vkMapMemory failed %d: %s.", result, getName(result) );
 			return result;
 		}
 
+		*(char**)_pointer += _allocation.m_offset + _offset;
 		return result;
 	}
 
 	void MemoryAllocatorVK::unmap(const AllocationVK& _allocation)
 	{
 		BX_ASSERT(0 == _allocation.m_offset, "");
+		// TODO skip if memory isn't mapped
 
 		const VkDevice device = s_renderVK->m_device;
 		vkUnmapMemory(device, _allocation.m_memory);
 	}
 
-	VkResult MemoryAllocatorVK::flush(const AllocationVK& _allocation, VkDeviceSize _offset)
+	VkResult MemoryAllocatorVK::flush(const AllocationVK& _allocation, VkDeviceSize _offset, VkDeviceSize _size)
 	{
-		BX_ASSERT(0 == _allocation.m_offset, "");
 		BX_ASSERT(0 != (_allocation.m_properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT), "Memory to flush must be host-visible.");
+		// TODO assert memory is currently mapped
 
-		if (_allocation.m_properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+		if (0 == _size
+		||  0 != (_allocation.m_properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) )
 		{
 			return VK_SUCCESS;
 		}
 
 		const VkDevice device = s_renderVK->m_device;
-		const VkPhysicalDeviceLimits& deviceLimits = s_renderVK->m_deviceProperties.limits;
-
-		const VkDeviceSize align = deviceLimits.nonCoherentAtomSize;
-		// TODO custom align function for > 32-bits
-		const VkDeviceSize size  = bx::min<VkDeviceSize>(bx::strideAlign(_offset, align), _allocation.m_size);
 
 		VkMappedMemoryRange range;
-		range.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-		range.pNext  = NULL;
-		range.memory = _allocation.m_memory;
-		range.offset = _allocation.m_offset;
-		range.size   = size;
+		alignMappedRange(_allocation, _offset, _size, &range);
 		return vkFlushMappedMemoryRanges(device, 1, &range);
 	}
 
-	VkResult MemoryAllocatorVK::invalidate(const AllocationVK& _allocation, VkDeviceSize _offset)
+	VkResult MemoryAllocatorVK::invalidate(const AllocationVK& _allocation, VkDeviceSize _offset, VkDeviceSize _size)
 	{
-		BX_UNUSED(_allocation, _offset);
-
-		BX_ASSERT(0 == _allocation.m_offset, "");
 		BX_ASSERT(0 != (_allocation.m_properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT), "Memory to invalidate must be host-visible.");
+		// TODO assert memory is currently mapped
 
-		if (_allocation.m_properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+		if (0 == _size
+		||  0 != (_allocation.m_properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) )
 		{
 			return VK_SUCCESS;
 		}
 
-		// TODO
+		const VkDevice device = s_renderVK->m_device;
 
-		return VK_SUCCESS;
+		VkMappedMemoryRange range;
+		alignMappedRange(_allocation, _offset, _size, &range);
+		return vkInvalidateMappedMemoryRanges(device, 1, &range);
 	}
 
 	bool MemoryAllocatorVK::updateMemoryBudget()
@@ -4643,6 +4654,33 @@ VK_DESTROY
 
 		BX_TRACE("Failed to find memory that supports flags 0x%08x.", _propertyFlags);
 		return -1;
+	}
+
+	void MemoryAllocatorVK::alignMappedRange(const AllocationVK& _allocation, VkDeviceSize _offset, VkDeviceSize _size, VkMappedMemoryRange* _range)
+	{
+		BX_ASSERT(0 == _allocation.m_offset, "");
+		BX_ASSERT(_offset < _allocation.m_size, "Offset out of range.");
+
+		const VkDeviceSize pre = _offset - alignDown(_offset, m_mapAlignment);
+		_offset -= pre;
+		_size = bx::min(_size + pre, _allocation.m_size - _offset);
+		_size = bx::min(alignUp(_size, m_mapAlignment), _allocation.m_size);
+
+		_range->sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+		_range->pNext  = NULL;
+		_range->memory = _allocation.m_memory;
+		_range->offset = _allocation.m_offset + _offset;
+		_range->size   = _size;
+	}
+
+	VkDeviceSize MemoryAllocatorVK::alignUp(VkDeviceSize _value, VkDeviceSize _alignment)
+	{
+		return alignDown(_value + _alignment - 1, _alignment);
+	}
+
+	VkDeviceSize MemoryAllocatorVK::alignDown(VkDeviceSize _value, VkDeviceSize _alignment)
+	{
+		return _value - (_value % _alignment);
 	}
 
 	void ScratchBufferVK::create(uint32_t _size, uint32_t _count)
@@ -4722,7 +4760,7 @@ VK_DESTROY
 
 	void ScratchBufferVK::flush()
 	{
-		s_renderVK->m_deviceAllocator.flush(m_deviceMem);
+		VK_CHECK(s_renderVK->m_deviceAllocator.flush(m_deviceMem, 0, m_pos) );
 	}
 
 	void BufferVK::create(VkCommandBuffer _commandBuffer, uint32_t _size, void* _data, uint16_t _flags, bool _vertex, uint32_t _stride)
@@ -5462,6 +5500,8 @@ VK_DESTROY
 
 		setMemoryBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT);
 
+		VK_CHECK(s_renderVK->m_deviceAllocator.invalidate(m_readbackMemory) );
+
 		while (update() )
 		{
 		}
@@ -5604,6 +5644,7 @@ VK_DESTROY
 
 			setMemoryBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT);
 			s_renderVK->kick(true);
+			VK_CHECK(s_renderVK->m_deviceAllocator.invalidate(m_readbackMemory) );
 
 			commandBuffer = s_renderVK->m_commandBuffer;
 
@@ -5729,9 +5770,10 @@ VK_DESTROY
 		uint32_t mipHeight = bx::uint32_max(1, m_height >> _mip);
 		uint32_t rowPitch = pitch(_mip);
 
+		uint8_t* dst = (uint8_t*)_data;
 		uint8_t* src;
 		VK_CHECK(s_renderVK->m_deviceAllocator.map(_memory, (void**)&src) );
-		uint8_t* dst = (uint8_t*)_data;
+		VK_CHECK(s_renderVK->m_deviceAllocator.invalidate(_memory) );
 
 		for (uint32_t yy = 0; yy < mipHeight; ++yy)
 		{
@@ -6147,6 +6189,7 @@ VK_DESTROY
 					mappedMemory += imageInfos[ii].size;
 				}
 
+				VK_CHECK(s_renderVK->m_deviceAllocator.flush(stagingMemory) );
 				s_renderVK->m_deviceAllocator.unmap(stagingMemory);
 
 				copyBufferToTexture(_commandBuffer, stagingBuffer, numSrd, bufferCopyInfo);

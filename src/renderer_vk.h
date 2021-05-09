@@ -380,17 +380,22 @@ VK_DESTROY_FUNC(DescriptorSet);
 		VkResult allocate(const VkMemoryRequirements& _requirements, MemoryType::Enum _type, AllocationVK* _allocation);
 		void release(AllocationVK& _allocation);
 
-		VkResult map(const AllocationVK& _allocation, void** _pointer);
+		VkResult map(const AllocationVK& _allocation, void** _pointer, VkDeviceSize offset = 0);
 		void unmap(const AllocationVK& _allocation);
 
-		VkResult flush(const AllocationVK& _allocation, VkDeviceSize _offset = 0);
-		VkResult invalidate(const AllocationVK& _allocation, VkDeviceSize _offset = 0);
+		VkResult flush(const AllocationVK& _allocation, VkDeviceSize _offset = 0, VkDeviceSize _size = VK_WHOLE_SIZE);
+		VkResult invalidate(const AllocationVK& _allocation, VkDeviceSize _offset = 0, VkDeviceSize _size = VK_WHOLE_SIZE);
 
 		bool updateMemoryBudget();
 
 		int32_t selectMemoryType(uint32_t _memoryTypeBits, uint32_t _propertyFlags, int32_t _startIndex = 0);
 
+		void alignMappedRange(const AllocationVK& _allocation, VkDeviceSize _offset, VkDeviceSize _size, VkMappedMemoryRange* _range);
+		static VkDeviceSize alignUp(VkDeviceSize _value, VkDeviceSize _alignment);
+		static VkDeviceSize alignDown(VkDeviceSize _value, VkDeviceSize _alignment);
+
 		VkPhysicalDeviceMemoryProperties m_memoryProperties;
+		VkDeviceSize m_mapAlignment;
 
 		VkDeviceSize heapUsage[VK_MAX_MEMORY_HEAPS];
 		VkDeviceSize heapBudget[VK_MAX_MEMORY_HEAPS];
