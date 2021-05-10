@@ -1042,8 +1042,6 @@ VK_IMPORT_DEVICE
 			);
 	}
 
-#define MAX_DESCRIPTOR_SETS (1024 * BGFX_CONFIG_MAX_FRAME_LATENCY)
-
 	struct RendererContextVK : public RendererContextI
 	{
 		RendererContextVK()
@@ -1861,18 +1859,18 @@ VK_IMPORT_DEVICE
 			{
 				VkDescriptorPoolSize dps[] =
 				{
-					{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,          MAX_DESCRIPTOR_SETS * BGFX_CONFIG_MAX_TEXTURE_SAMPLERS },
-					{ VK_DESCRIPTOR_TYPE_SAMPLER,                MAX_DESCRIPTOR_SETS * BGFX_CONFIG_MAX_TEXTURE_SAMPLERS },
-					{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, MAX_DESCRIPTOR_SETS * 2                                },
-					{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         MAX_DESCRIPTOR_SETS * BGFX_CONFIG_MAX_TEXTURE_SAMPLERS },
-					{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          MAX_DESCRIPTOR_SETS * BGFX_CONFIG_MAX_TEXTURE_SAMPLERS },
+					{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,          BGFX_VK_CONFIG_MAX_DESCRIPTOR_SETS * BGFX_CONFIG_MAX_TEXTURE_SAMPLERS },
+					{ VK_DESCRIPTOR_TYPE_SAMPLER,                BGFX_VK_CONFIG_MAX_DESCRIPTOR_SETS * BGFX_CONFIG_MAX_TEXTURE_SAMPLERS },
+					{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, BGFX_VK_CONFIG_MAX_DESCRIPTOR_SETS * 2                                },
+					{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         BGFX_VK_CONFIG_MAX_DESCRIPTOR_SETS * BGFX_CONFIG_MAX_TEXTURE_SAMPLERS },
+					{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          BGFX_VK_CONFIG_MAX_DESCRIPTOR_SETS * BGFX_CONFIG_MAX_TEXTURE_SAMPLERS },
 				};
 
 				VkDescriptorPoolCreateInfo dpci;
 				dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 				dpci.pNext = NULL;
 				dpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-				dpci.maxSets       = MAX_DESCRIPTOR_SETS;
+				dpci.maxSets       = BGFX_VK_CONFIG_MAX_DESCRIPTOR_SETS;
 				dpci.poolSizeCount = BX_COUNTOF(dps);
 				dpci.pPoolSizes    = dps;
 
@@ -4435,18 +4433,22 @@ VK_DESTROY
 		bx::memSet(&m_memoryProperties, 0, sizeof(m_memoryProperties) );
 		vkGetPhysicalDeviceMemoryProperties(physicalDevice, &m_memoryProperties);
 
-		constexpr VkDeviceSize blockSize = 8 << 20;
-
 		const VkPhysicalDeviceLimits& limits = s_renderVK->m_deviceProperties.limits;
 		m_mapAlignment = limits.nonCoherentAtomSize;
 		m_minAllocationSize = limits.bufferImageGranularity;
-		m_minBlockSize = alignUp(blockSize, m_minAllocationSize);
+		m_minBlockSize = alignUp(BGFX_VK_CONFIG_ALLOCATOR_BLOCK_SIZE, m_minAllocationSize);
 
 		for (uint32_t ii = 0; ii < m_memoryProperties.memoryTypeCount; ++ii)
 		{
 			m_pools[ii].m_allocationCount = 0;
 			m_pools[ii].m_allocationSize  = 0;
 		}
+
+		BX_WARN(
+			  !BGFX_VK_CONFIG_ALLOCATOR_DEDICATED_ONLY
+			, "Using dedicated memory for all allocations. Max. number of allocations: %d."
+			, limits.maxMemoryAllocationCount
+			);
 	}
 
 	void MemoryAllocatorVK::shutdown()
@@ -4868,7 +4870,10 @@ VK_DESTROY
 		*_blockIndex      = UINT32_MAX;
 		*_allocationIndex = UINT32_MAX;
 
-		const bool dedicated = true; // NULL != _dedicatedInfo;
+		const bool dedicated = false
+			|| BGFX_VK_CONFIG_ALLOCATOR_DEDICATED_ONLY
+			|| NULL != _dedicatedInfo
+			;
 
 		if (!dedicated)
 		{
