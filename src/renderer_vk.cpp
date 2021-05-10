@@ -4736,38 +4736,60 @@ VK_DESTROY
 
 	VkResult MemoryAllocatorVK::map(const AllocationVK& _allocation, void** _pointer, VkDeviceSize _offset)
 	{
-		// TODO reference-counting
-
-		BX_ASSERT(0 == _allocation.m_offset, "");
+		BX_ASSERT(_offset < _allocation.m_size, "Offset out of range.");
 		BX_ASSERT(0 != (_allocation.m_properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT), "Memory to map must be host-visible.");
 
-		const VkDevice device = s_renderVK->m_device;
-		const VkDeviceSize size = _allocation.m_size; // TODO memory size, not block size
-
-		VkResult result = vkMapMemory(device, _allocation.m_memory, 0, size, 0, _pointer);
-		if (VK_SUCCESS != result)
+		uint32_t blockIndex;
+		if (!findBlock(_allocation, &blockIndex) )
 		{
-			BX_TRACE("Map memory error: vkMapMemory failed %d: %s.", result, getName(result) );
-			return result;
+			return VK_ERROR_UNKNOWN;
 		}
 
-		*(char**)_pointer += _allocation.m_offset + _offset;
+		Pool& pool = m_pools[_allocation.m_pool];
+		Block& block = pool.m_blocks[blockIndex];
+
+		VkResult result = VK_SUCCESS;
+
+		if (0 == block.m_mapCount)
+		{
+			const VkDevice device = s_renderVK->m_device;
+			const VkDeviceSize size = block.m_size;
+
+			result = vkMapMemory(device, block.m_memory, 0, size, 0, &block.m_mapped);
+			if (VK_SUCCESS != result)
+			{
+				BX_TRACE("Map memory error: vkMapMemory failed %d: %s.", result, getName(result));
+				return result;
+			}
+		}
+
+		block.m_mapCount++;
+
+		*_pointer = (char*)block.m_mapped + _allocation.m_offset + _offset;
 		return result;
 	}
 
 	void MemoryAllocatorVK::unmap(const AllocationVK& _allocation)
 	{
-		BX_ASSERT(0 == _allocation.m_offset, "");
-		// TODO skip if memory isn't mapped
+		uint32_t blockIndex;
+		if (findBlock(_allocation, &blockIndex))
+		{
+			Pool& pool = m_pools[_allocation.m_pool];
+			Block& block = pool.m_blocks[blockIndex];
+			block.m_mapCount--;
 
-		const VkDevice device = s_renderVK->m_device;
-		vkUnmapMemory(device, _allocation.m_memory);
+			if (0 == block.m_mapCount)
+			{
+				vkUnmapMemory(s_renderVK->m_device, _allocation.m_memory);
+				block.m_mapped = NULL;
+			}
+		}
 	}
 
 	VkResult MemoryAllocatorVK::flush(const AllocationVK& _allocation, VkDeviceSize _offset, VkDeviceSize _size)
 	{
 		BX_ASSERT(0 != (_allocation.m_properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT), "Memory to flush must be host-visible.");
-		// TODO assert memory is currently mapped
+		// TODO check if memory is currently mapped
 
 		if (0 == _size
 		||  0 != (_allocation.m_properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) )
@@ -4785,7 +4807,7 @@ VK_DESTROY
 	VkResult MemoryAllocatorVK::invalidate(const AllocationVK& _allocation, VkDeviceSize _offset, VkDeviceSize _size)
 	{
 		BX_ASSERT(0 != (_allocation.m_properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT), "Memory to invalidate must be host-visible.");
-		// TODO assert memory is currently mapped
+		// TODO check if memory is currently mapped
 
 		if (0 == _size
 		||  0 != (_allocation.m_properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) )
