@@ -378,24 +378,32 @@ VK_DESTROY_FUNC(DescriptorSet);
 
 	struct MemoryAllocatorVK
 	{
-		struct Pool
-		{
-			uint32_t m_allocationCount;
-			VkDeviceSize m_allocationSize;
-		};
-
-		struct Block
-		{
-			VkDeviceMemory m_memory;
-			VkDeviceSize m_free;
-			uint32_t m_mapCount;
-		};
-
 		struct Allocation
 		{
 			VkDeviceSize m_offset;
 			VkDeviceSize m_size;
 			bool occupied;
+		};
+
+		struct Block
+		{
+			VkDeviceMemory m_memory;
+			VkDeviceSize m_size;
+			VkDeviceSize m_pointer;
+			uint32_t m_mapCount;
+			void* m_mapped;
+
+			typedef stl::vector<Allocation> AllocationArray;
+			AllocationArray m_allocations;
+		};
+
+		struct Pool
+		{
+			uint32_t m_allocationCount;
+			VkDeviceSize m_allocationSize;
+
+			typedef stl::vector<Block> BlockArray;
+			BlockArray m_blocks;
 		};
 
 		void init();
@@ -414,6 +422,10 @@ VK_DESTROY_FUNC(DescriptorSet);
 		VkResult invalidate(const AllocationVK& _allocation, VkDeviceSize _offset = 0, VkDeviceSize _size = VK_WHOLE_SIZE);
 
 		int32_t selectMemoryType(uint32_t _memoryTypeBits, uint32_t _propertyFlags, int32_t _startIndex = 0);
+		VkResult getFreeAllocation(uint32_t _pool, VkDeviceSize _size, const VkMemoryDedicatedAllocateInfoKHR* _dedicatedInfo, uint32_t* _blockIndex, uint32_t* _allocationIndex);
+
+		bool findBlock(const AllocationVK& _allocation, uint32_t* _blockIndex) const;
+		bool findAllocation(const AllocationVK& _allocation, uint32_t blockIndex, uint32_t* _allocationIndex) const;
 
 		void alignMappedRange(const AllocationVK& _allocation, VkDeviceSize _offset, VkDeviceSize _size, VkMappedMemoryRange* _range);
 		static VkDeviceSize alignUp(VkDeviceSize _value, VkDeviceSize _alignment);

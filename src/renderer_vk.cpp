@@ -4451,12 +4451,12 @@ VK_DESTROY
 		const VkPhysicalDeviceLimits& limits = s_renderVK->m_deviceProperties.limits;
 		m_mapAlignment = limits.nonCoherentAtomSize;
 		m_minAllocationSize = limits.bufferImageGranularity;
-		m_minBlockSize = bx::max(blockSize, m_minAllocationSize);
+		m_minBlockSize = alignUp(blockSize, m_minAllocationSize);
 
 		for (uint32_t ii = 0; ii < m_memoryProperties.memoryTypeCount; ++ii)
 		{
 			m_pools[ii].m_allocationCount = 0;
-			m_pools[ii].m_allocationSize = 0;
+			m_pools[ii].m_allocationSize  = 0;
 		}
 	}
 
@@ -4630,11 +4630,6 @@ VK_DESTROY
 
 	VkResult MemoryAllocatorVK::allocate(const VkMemoryRequirements& _requirements, const VkMemoryDedicatedAllocateInfoKHR* _dedicatedInfo, MemoryType::Enum _type, AllocationVK* _allocation)
 	{
-		// TODO align and round size of host-visible, non-coherent memory up to nonCoherentAtomSize
-
-		const VkDevice device = s_renderVK->m_device;
-		const VkAllocationCallbacks* allocatorCb = s_renderVK->m_allocatorCb;
-
 		VkMemoryPropertyFlags propertyFlags[3];
 		uint8_t propertyFlagsCount = 0;
 
@@ -4658,44 +4653,41 @@ VK_DESTROY
 			break;
 		}
 
-		VkMemoryAllocateInfo mai;
-		mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-		mai.pNext = NULL;
-		mai.allocationSize = _requirements.size;
-
-		if (NULL != _dedicatedInfo)
-		{
-			mai.pNext = _dedicatedInfo;
-		}		
-
-		_allocation->m_memory = VK_NULL_HANDLE;
-
 		VkResult result = VK_ERROR_UNKNOWN;
 
 		for (uint8_t ii = 0; ii < propertyFlagsCount; ++ii)
 		{
-			int32_t searchIndex = -1;
+			int32_t poolIndex = -1;
 			do
 			{
-				searchIndex++;
-				searchIndex = selectMemoryType(_requirements.memoryTypeBits, propertyFlags[ii], searchIndex);
+				poolIndex++;
+				poolIndex = selectMemoryType(_requirements.memoryTypeBits, propertyFlags[ii], poolIndex);
 
-				if (searchIndex >= 0)
+				if (poolIndex >= 0)
 				{
-					mai.memoryTypeIndex = searchIndex;
-					result = vkAllocateMemory(device, &mai, allocatorCb, &_allocation->m_memory);
-					
-					_allocation->m_offset = 0;
-					_allocation->m_size = _requirements.size;
-					_allocation->m_pool = searchIndex;
-					_allocation->m_properties = propertyFlags[ii];
+					uint32_t blockIndex;
+					uint32_t allocationIndex;
+					result = getFreeAllocation(poolIndex, _requirements.size, _dedicatedInfo, &blockIndex, &allocationIndex);
 
-					m_pools[_allocation->m_pool].m_allocationCount++;
-					m_pools[_allocation->m_pool].m_allocationSize += _allocation->m_size;
+					if (VK_SUCCESS == result)
+					{
+						Pool& pool = m_pools[poolIndex];
+						const Block& block = pool.m_blocks[blockIndex];
+						const Allocation& allocation = block.m_allocations[allocationIndex];
+
+						BX_ASSERT(1 == block.m_allocations.size(), "");
+
+						_allocation->m_memory = block.m_memory;
+						_allocation->m_offset = allocation.m_offset;
+						_allocation->m_size   = allocation.m_size;
+						_allocation->m_pool   = poolIndex;
+						_allocation->m_properties = propertyFlags[ii];
+
+						break;
+					}
 				}
 			}
-			while (result != VK_SUCCESS
-			&&     searchIndex >= 0);
+			while (poolIndex >= 0);
 
 			if (VK_SUCCESS == result)
 			{
@@ -4708,15 +4700,38 @@ VK_DESTROY
 
 	void MemoryAllocatorVK::release(AllocationVK& _allocation)
 	{
-		// TODO mark chunk as available in + m_numFramesInFlight frames
-		// TODO unmap if mapped
+		uint32_t blockIndex;
+		if (findBlock(_allocation, &blockIndex) )
+		{
+			uint32_t allocationIndex;
+			if (findAllocation(_allocation, blockIndex, &allocationIndex) )
+			{
+				Pool& pool = m_pools[_allocation.m_pool];
+				Block& block = pool.m_blocks[blockIndex];
+				const Allocation& allocation = block.m_allocations[allocationIndex];
 
-		BX_ASSERT(0 == _allocation.m_offset, "");
+				// TODO find allocation and don't release memory if it isn't the last allocation
+				// TODO release deferred so memory can be reclaimed within X frames
 
-		m_pools[_allocation.m_pool].m_allocationCount--;
-		m_pools[_allocation.m_pool].m_allocationSize -= _allocation.m_size;
+				BX_ASSERT(0 == allocation.m_offset, "");
 
-		s_renderVK->release(_allocation.m_memory);
+				pool.m_allocationCount--;
+				pool.m_allocationSize -= block.m_size;
+
+				if (block.m_mapCount > 0)
+				{
+					vkUnmapMemory(s_renderVK->m_device, block.m_memory);
+				}
+
+				s_renderVK->release(block.m_memory);
+				_allocation.m_memory = VK_NULL_HANDLE;
+
+				pool.m_blocks.erase(pool.m_blocks.begin() + blockIndex);
+				return;
+			}
+		}
+
+		BX_ASSERT(false, "Unknown memory block.");
 	}
 
 	VkResult MemoryAllocatorVK::map(const AllocationVK& _allocation, void** _pointer, VkDeviceSize _offset)
@@ -4835,6 +4850,106 @@ VK_DESTROY
 
 		BX_TRACE("Failed to find memory that supports flags 0x%08x.", _propertyFlags);
 		return -1;
+	}
+
+	VkResult MemoryAllocatorVK::getFreeAllocation(uint32_t _pool, VkDeviceSize _size, const VkMemoryDedicatedAllocateInfoKHR* _dedicatedInfo, uint32_t* _blockIndex, uint32_t* _allocationIndex)
+	{
+		Pool& pool = m_pools[_pool];
+
+		*_blockIndex      = UINT32_MAX;
+		*_allocationIndex = UINT32_MAX;
+
+		const bool dedicated = true; // NULL != _dedicatedInfo;
+
+		if (!dedicated)
+		{
+			// TODO find free block
+			// TODO find free allocation inside block
+
+			if (UINT32_MAX != *_allocationIndex)
+			{
+				return VK_SUCCESS;
+			}
+		}
+
+		// create new block
+
+		const VkDevice device = s_renderVK->m_device;
+		const VkAllocationCallbacks* allocatorCb = s_renderVK->m_allocatorCb;
+
+		// TODO align and round size of host-visible, non-coherent memory up to nonCoherentAtomSize
+
+		VkMemoryAllocateInfo mai;
+		mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		mai.pNext = _dedicatedInfo;
+		mai.memoryTypeIndex = _pool;
+		mai.allocationSize = dedicated
+			? _size
+			: alignUp(_size, m_minBlockSize)
+			;
+
+		Block newBlock;
+		VkResult result = vkAllocateMemory(device, &mai, allocatorCb, &newBlock.m_memory);
+		if (VK_SUCCESS == result)
+		{
+			newBlock.m_size = mai.allocationSize;
+			newBlock.m_pointer = alignUp(_size, m_minAllocationSize);
+			newBlock.m_mapCount = 0;
+
+			*_blockIndex = uint32_t(pool.m_blocks.size() );
+			pool.m_blocks.push_back(newBlock);
+
+			Block& block = pool.m_blocks[*_blockIndex];
+
+			Allocation newAllocation;
+			newAllocation.m_offset = 0;
+			newAllocation.m_size = _size;
+			newAllocation.occupied = true;
+
+			*_allocationIndex = uint32_t(block.m_allocations.size() );
+			block.m_allocations.push_back(newAllocation);
+
+			pool.m_allocationSize += newBlock.m_size;
+		}
+
+		pool.m_allocationCount++;
+
+		return result;
+	}
+
+	bool MemoryAllocatorVK::findBlock(const AllocationVK& _allocation, uint32_t* _blockIndex) const
+	{
+		const Pool& pool = m_pools[_allocation.m_pool];
+
+		for (size_t ii = 0, num = pool.m_blocks.size(); ii < num; ++ii)
+		{
+			const Block& block = pool.m_blocks[ii];
+			if (_allocation.m_memory == block.m_memory)
+			{
+				*_blockIndex = uint32_t(ii);
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	bool MemoryAllocatorVK::findAllocation(const AllocationVK& _allocation, uint32_t _blockIndex, uint32_t* _allocationIndex) const
+	{
+		const Pool& pool = m_pools[_allocation.m_pool];
+		const Block& block = pool.m_blocks[_blockIndex];
+
+		for (size_t ii = 0, num = block.m_allocations.size(); ii < num; ++ii)
+		{
+			const Allocation& allocation = block.m_allocations[ii];
+			if (_allocation.m_offset == allocation.m_offset)
+			{
+				*_allocationIndex = uint32_t(ii);
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	void MemoryAllocatorVK::alignMappedRange(const AllocationVK& _allocation, VkDeviceSize _offset, VkDeviceSize _size, VkMappedMemoryRange* _range)
