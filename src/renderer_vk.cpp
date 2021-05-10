@@ -502,13 +502,13 @@ VK_IMPORT_DEVICE
 
 	static void* VKAPI_PTR allocationFunction(void* _userData, size_t _size, size_t _alignment, VkSystemAllocationScope _allocationScope)
 	{
-		BX_UNUSED(_userData, _allocationScope);
+		BX_UNUSED(_userData);
 		return bx::alignedAlloc(g_allocator, _size, _alignment, s_allocScopeName[_allocationScope]);
 	}
 
 	static void* VKAPI_PTR reallocationFunction(void* _userData, void* _original, size_t _size, size_t _alignment, VkSystemAllocationScope _allocationScope)
 	{
-		BX_UNUSED(_userData, _allocationScope);
+		BX_UNUSED(_userData);
 		return bx::alignedRealloc(g_allocator, _original, _size, _alignment, s_allocScopeName[_allocationScope]);
 	}
 
@@ -524,24 +524,14 @@ VK_IMPORT_DEVICE
 		bx::alignedFree(g_allocator, _memory, 8);
 	}
 
-	static void VKAPI_PTR internalAllocationNotification(void* _userData, size_t _size, VkInternalAllocationType _allocationType, VkSystemAllocationScope _allocationScope)
-	{
-		BX_UNUSED(_userData, _size, _allocationType, _allocationScope);
-	}
-
-	static void VKAPI_PTR internalFreeNotification(void* _userData, size_t _size, VkInternalAllocationType _allocationType, VkSystemAllocationScope _allocationScope)
-	{
-		BX_UNUSED(_userData, _size, _allocationType, _allocationScope);
-	}
-
 	static VkAllocationCallbacks s_allocationCb =
 	{
 		NULL,
 		allocationFunction,
 		reallocationFunction,
 		freeFunction,
-		internalAllocationNotification,
-		internalFreeNotification,
+		NULL,
+		NULL,
 	};
 
 	VkResult VKAPI_PTR stubSetDebugUtilsObjectNameEXT(VkDevice _device, const VkDebugUtilsObjectNameInfoEXT* _nameInfo)
@@ -1268,7 +1258,6 @@ VK_IMPORT
 				if (BX_ENABLED(BGFX_CONFIG_DEBUG) )
 				{
 					m_allocatorCb = &s_allocationCb;
-					BX_UNUSED(s_allocationCb);
 				}
 
 				result = vkCreateInstance(
@@ -1324,7 +1313,7 @@ VK_IMPORT_INSTANCE
 					;
 				result = vkCreateDebugReportCallbackEXT(m_instance
 					, &drcb
-					, m_allocatorCb
+					, NULL
 					, &m_debugReportCallback
 					);
 				BX_WARN(VK_SUCCESS == result, "vkCreateDebugReportCallbackEXT failed %d: %s.", result, getName(result) );
@@ -1780,7 +1769,7 @@ VK_IMPORT_INSTANCE
 				result = vkCreateDevice(
 					  m_physicalDevice
 					, &dci
-					, m_allocatorCb
+					, NULL
 					, &m_device
 					);
 
@@ -1887,7 +1876,7 @@ VK_IMPORT_DEVICE
 				dpci.poolSizeCount = BX_COUNTOF(dps);
 				dpci.pPoolSizes    = dps;
 
-				result = vkCreateDescriptorPool(m_device, &dpci, m_allocatorCb, &m_descriptorPool);
+				result = vkCreateDescriptorPool(m_device, &dpci, NULL, &m_descriptorPool);
 
 				if (VK_SUCCESS != result)
 				{
@@ -1901,7 +1890,7 @@ VK_IMPORT_DEVICE
 				pcci.flags = 0;
 				pcci.initialDataSize = 0;
 				pcci.pInitialData    = NULL;
-				result = vkCreatePipelineCache(m_device, &pcci, m_allocatorCb, &m_pipelineCache);
+				result = vkCreatePipelineCache(m_device, &pcci, NULL, &m_pipelineCache);
 
 				if (VK_SUCCESS != result)
 				{
@@ -1998,13 +1987,13 @@ VK_IMPORT_DEVICE
 				BX_FALLTHROUGH;
 
 			case ErrorState::DeviceCreated:
-				vkDestroyDevice(m_device, m_allocatorCb);
+				vkDestroyDevice(m_device, NULL);
 				BX_FALLTHROUGH;
 
 			case ErrorState::InstanceCreated:
 				if (VK_NULL_HANDLE != m_debugReportCallback)
 				{
-					vkDestroyDebugReportCallbackEXT(m_instance, m_debugReportCallback, m_allocatorCb);
+					vkDestroyDebugReportCallbackEXT(m_instance, m_debugReportCallback, NULL);
 				}
 
 				vkDestroyInstance(m_instance, m_allocatorCb);
@@ -2080,11 +2069,11 @@ VK_IMPORT_DEVICE
 			vkDestroy(m_pipelineCache);
 			vkDestroy(m_descriptorPool);
 
-			vkDestroyDevice(m_device, m_allocatorCb);
+			vkDestroyDevice(m_device, NULL);
 
 			if (VK_NULL_HANDLE != m_debugReportCallback)
 			{
-				vkDestroyDebugReportCallbackEXT(m_instance, m_debugReportCallback, m_allocatorCb);
+				vkDestroyDebugReportCallbackEXT(m_instance, m_debugReportCallback, NULL);
 			}
 
 			vkDestroyInstance(m_instance, m_allocatorCb);
@@ -3226,7 +3215,7 @@ VK_IMPORT_DEVICE
 			rpi.dependencyCount = BX_COUNTOF(dep);
 			rpi.pDependencies   = dep;
 
-			result = vkCreateRenderPass(m_device, &rpi, m_allocatorCb, &renderPass);
+			result = vkCreateRenderPass(m_device, &rpi, NULL, &renderPass);
 
 			if (VK_SUCCESS != result)
 			{
@@ -3381,7 +3370,7 @@ VK_IMPORT_DEVICE
 				sci.borderColor = VK_BORDER_COLOR_FLOAT_CUSTOM_EXT;
 			}
 
-			VK_CHECK(vkCreateSampler(m_device, &sci, m_allocatorCb, &sampler) );
+			VK_CHECK(vkCreateSampler(m_device, &sci, NULL, &sampler) );
 
 			m_samplerCache.add(hashKey, sampler);
 			return sampler;
@@ -3454,7 +3443,7 @@ VK_IMPORT_DEVICE
 			cpci.basePipelineHandle = VK_NULL_HANDLE;
 			cpci.basePipelineIndex  = 0;
 
-			VK_CHECK(vkCreateComputePipelines(m_device, m_pipelineCache, 1, &cpci, m_allocatorCb, &pipeline) );
+			VK_CHECK(vkCreateComputePipelines(m_device, m_pipelineCache, 1, &cpci, NULL, &pipeline) );
 
 			m_pipelineStateCache.add(hash, pipeline);
 
@@ -3676,14 +3665,14 @@ VK_IMPORT_DEVICE
 			}
 
 			VkPipelineCache cache;
-			VK_CHECK(vkCreatePipelineCache(m_device, &pcci, m_allocatorCb, &cache) );
+			VK_CHECK(vkCreatePipelineCache(m_device, &pcci, NULL, &cache) );
 
 			VK_CHECK(vkCreateGraphicsPipelines(
 				  m_device
 				, cache
 				, 1
 				, &graphicsPipeline
-				, m_allocatorCb
+				, NULL
 				, &pipeline
 				) );
 			m_pipelineStateCache.add(hash, pipeline);
@@ -4381,18 +4370,18 @@ VK_IMPORT_DEVICE
 		s_renderVK = NULL;
 	}
 
-#define VK_DESTROY_FUNC(_name)                                                          \
-	void vkDestroy(Vk##_name& _obj)                                                     \
-	{                                                                                   \
-		if (VK_NULL_HANDLE != _obj)                                                     \
-		{                                                                               \
-			vkDestroy##_name(s_renderVK->m_device, _obj.vk, s_renderVK->m_allocatorCb); \
-			_obj = VK_NULL_HANDLE;                                                      \
-		}                                                                               \
-	}                                                                                   \
-	void release(Vk##_name& _obj)                                                       \
-	{                                                                                   \
-		s_renderVK->release(_obj);                                                      \
+#define VK_DESTROY_FUNC(_name)                                     \
+	void vkDestroy(Vk##_name& _obj)                                \
+	{                                                              \
+		if (VK_NULL_HANDLE != _obj)                                \
+		{                                                          \
+			vkDestroy##_name(s_renderVK->m_device, _obj.vk, NULL); \
+			_obj = VK_NULL_HANDLE;                                 \
+		}                                                          \
+	}                                                              \
+	void release(Vk##_name& _obj)                                  \
+	{                                                              \
+		s_renderVK->release(_obj);                                 \
 	}
 VK_DESTROY
 #undef VK_DESTROY_FUNC
@@ -4401,7 +4390,7 @@ VK_DESTROY
 	{
 		if (VK_NULL_HANDLE != _obj)
 		{
-			vkFreeMemory(s_renderVK->m_device, _obj.vk, s_renderVK->m_allocatorCb);
+			vkFreeMemory(s_renderVK->m_device, _obj.vk, NULL);
 			_obj = VK_NULL_HANDLE;
 		}
 	}
@@ -4410,7 +4399,7 @@ VK_DESTROY
 	{
 		if (VK_NULL_HANDLE != _obj)
 		{
-			vkDestroySurfaceKHR(s_renderVK->m_instance, _obj.vk, s_renderVK->m_allocatorCb);
+			vkDestroySurfaceKHR(s_renderVK->m_instance, _obj.vk, NULL);
 			_obj = VK_NULL_HANDLE;
 		}
 	}
@@ -4483,14 +4472,8 @@ VK_DESTROY
 		VkResult result = VK_SUCCESS;
 
 		const VkDevice device = s_renderVK->m_device;
-		const VkAllocationCallbacks* allocatorCb = s_renderVK->m_allocatorCb;
 
-		result = vkCreateBuffer(
-			  device
-			, &_info
-			, allocatorCb
-			, _buffer
-			);
+		result = vkCreateBuffer(device, &_info, NULL, _buffer);
 
 		if (VK_SUCCESS != result)
 		{
@@ -4563,14 +4546,8 @@ VK_DESTROY
 		VkResult result = VK_SUCCESS;
 
 		const VkDevice device = s_renderVK->m_device;
-		const VkAllocationCallbacks* allocatorCb = s_renderVK->m_allocatorCb;
 
-		result = vkCreateImage(
-			  device
-			, &_info
-			, allocatorCb
-			, _image
-			);
+		result = vkCreateImage(device, &_info, NULL, _image);
 
 		if (VK_SUCCESS != result)
 		{
@@ -4907,7 +4884,6 @@ VK_DESTROY
 		// create new block
 
 		const VkDevice device = s_renderVK->m_device;
-		const VkAllocationCallbacks* allocatorCb = s_renderVK->m_allocatorCb;
 
 		// TODO align and round size of host-visible, non-coherent memory up to nonCoherentAtomSize
 
@@ -4921,7 +4897,7 @@ VK_DESTROY
 			;
 
 		Block newBlock;
-		VkResult result = vkAllocateMemory(device, &mai, allocatorCb, &newBlock.m_memory);
+		VkResult result = vkAllocateMemory(device, &mai, NULL, &newBlock.m_memory);
 		if (VK_SUCCESS == result)
 		{
 			newBlock.m_size = mai.allocationSize;
@@ -5404,12 +5380,8 @@ VK_DESTROY
 
 //		disassemble(bx::getDebugOut(), m_code->data, m_code->size);
 
-		VK_CHECK(vkCreateShaderModule(
-			  s_renderVK->m_device
-			, &smci
-			, s_renderVK->m_allocatorCb
-			, &m_module
-			) );
+		const VkDevice device = s_renderVK->m_device;
+		VK_CHECK(vkCreateShaderModule(device, &smci, NULL, &m_module) );
 
 		bx::memSet(m_attrMask,  0, sizeof(m_attrMask) );
 		bx::memSet(m_attrRemap, 0, sizeof(m_attrRemap) );
@@ -5587,6 +5559,7 @@ VK_DESTROY
 		}
 
 		// create exact pipeline layout
+		const VkDevice device = s_renderVK->m_device;
 		m_descriptorSetLayout = VK_NULL_HANDLE;
 
 		uint32_t numBindings = m_vsh->m_numBindings + (m_fsh ? m_fsh->m_numBindings : 0);
@@ -5655,12 +5628,7 @@ VK_DESTROY
 				dslci.bindingCount = numBindings;
 				dslci.pBindings = bindings;
 
-				VK_CHECK(vkCreateDescriptorSetLayout(
-					  s_renderVK->m_device
-					, &dslci
-					, s_renderVK->m_allocatorCb
-					, &m_descriptorSetLayout
-					) );
+				VK_CHECK(vkCreateDescriptorSetLayout(device, &dslci, NULL, &m_descriptorSetLayout) );
 
 				s_renderVK->m_descriptorSetLayoutCache.add(descriptorSetLayoutHash, m_descriptorSetLayout);
 			}
@@ -5675,12 +5643,7 @@ VK_DESTROY
 		plci.setLayoutCount = (m_descriptorSetLayout == VK_NULL_HANDLE ? 0 : 1);
 		plci.pSetLayouts = &m_descriptorSetLayout;
 
-		VK_CHECK(vkCreatePipelineLayout(
-			  s_renderVK->m_device
-			, &plci
-			, s_renderVK->m_allocatorCb
-			, &m_pipelineLayout
-			) );
+		VK_CHECK(vkCreatePipelineLayout(device, &plci, NULL, &m_pipelineLayout) );
 	}
 
 	void ProgramVK::destroy()
@@ -5708,7 +5671,7 @@ VK_DESTROY
 		qpci.queryCount = count;
 		qpci.pipelineStatistics = 0;
 
-		result = vkCreateQueryPool(device, &qpci, s_renderVK->m_allocatorCb, &m_queryPool);
+		result = vkCreateQueryPool(device, &qpci, NULL, &m_queryPool);
 
 		if (VK_SUCCESS != result)
 		{
@@ -5859,7 +5822,7 @@ VK_DESTROY
 		qpci.queryCount = count;
 		qpci.pipelineStatistics = 0;
 
-		result = vkCreateQueryPool(device, &qpci, s_renderVK->m_allocatorCb, &m_queryPool);
+		result = vkCreateQueryPool(device, &qpci, NULL, &m_queryPool);
 
 		if (VK_SUCCESS != result)
 		{
@@ -6799,14 +6762,10 @@ VK_DESTROY
 				;
 		}
 
+		const VkDevice device = s_renderVK->m_device;
 		VkImageView view = VK_NULL_HANDLE;
 
-		result = vkCreateImageView(
-			  s_renderVK->m_device
-			, &viewInfo
-			, s_renderVK->m_allocatorCb
-			, &view
-			);
+		result = vkCreateImageView(device, &viewInfo, NULL, &view);
 
 		if (VK_SUCCESS != result)
 		{
@@ -7073,7 +7032,6 @@ VK_DESTROY
 		VkResult result = VK_ERROR_INITIALIZATION_FAILED;
 
 		const VkInstance instance = s_renderVK->m_instance;
-		const VkAllocationCallbacks* allocatorCb = s_renderVK->m_allocatorCb;
 
 #if BX_PLATFORM_WINDOWS
 		{
@@ -7085,7 +7043,7 @@ VK_DESTROY
 				sci.flags     = 0;
 				sci.hinstance = (HINSTANCE)GetModuleHandle(NULL);
 				sci.hwnd      = (HWND)m_nwh;
-				result = vkCreateWin32SurfaceKHR(instance, &sci, allocatorCb, &m_surface);
+				result = vkCreateWin32SurfaceKHR(instance, &sci, NULL, &m_surface);
 			}
 		}
 #elif BX_PLATFORM_ANDROID
@@ -7097,7 +7055,7 @@ VK_DESTROY
 				sci.pNext = NULL;
 				sci.flags = 0;
 				sci.window = (ANativeWindow*)m_nwh;
-				result = vkCreateAndroidSurfaceKHR(instance, &sci, allocatorCb, &m_surface);
+				result = vkCreateAndroidSurfaceKHR(instance, &sci, NULL, &m_surface);
 			}
 		}
 #elif BX_PLATFORM_LINUX
@@ -7110,7 +7068,7 @@ VK_DESTROY
 				sci.flags  = 0;
 				sci.dpy    = (Display*)g_platformData.ndt;
 				sci.window = (Window)m_nwh;
-				result = vkCreateXlibSurfaceKHR(instance, &sci, allocatorCb, &m_surface);
+				result = vkCreateXlibSurfaceKHR(instance, &sci, NULL, &m_surface);
 			}
 
 			if (VK_SUCCESS != result)
@@ -7131,7 +7089,7 @@ VK_DESTROY
 					sci.flags      = 0;
 					sci.connection = XGetXCBConnection( (Display*)g_platformData.ndt);
 					sci.window     = cast.window;
-					result = vkCreateXcbSurfaceKHR(instance, &sci, allocatorCb, &m_surface);
+					result = vkCreateXcbSurfaceKHR(instance, &sci, NULL, &m_surface);
 
 					bx::dlclose(xcbdll);
 				}
@@ -7158,7 +7116,7 @@ VK_DESTROY
 				sci.pNext = NULL;
 				sci.flags = 0;
 				sci.pView = (__bridge void*)layer;
-				result = vkCreateMacOSSurfaceMVK(instance, &sci, allocatorCb, &m_surface);
+				result = vkCreateMacOSSurfaceMVK(instance, &sci, NULL, &m_surface);
 			}
 		}
 #else
@@ -7200,7 +7158,6 @@ VK_DESTROY
 
 		const VkPhysicalDevice physicalDevice = s_renderVK->m_physicalDevice;
 		const VkDevice device = s_renderVK->m_device;
-		const VkAllocationCallbacks* allocatorCb = s_renderVK->m_allocatorCb;
 
 		VkSurfaceCapabilitiesKHR surfaceCapabilities;
 		result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, m_surface, &surfaceCapabilities);
@@ -7300,7 +7257,7 @@ VK_DESTROY
 		m_sci.presentMode        = s_presentMode[presentModeIdx].mode;
 		m_sci.clipped            = VK_FALSE;
 
-		result = vkCreateSwapchainKHR(device, &m_sci, allocatorCb, &m_swapchain);
+		result = vkCreateSwapchainKHR(device, &m_sci, NULL, &m_swapchain);
 		if (VK_SUCCESS != result)
 		{
 			BX_TRACE("Create swapchain error: vkCreateSwapchainKHR failed %d: %s.", result, getName(result) );
@@ -7364,7 +7321,7 @@ VK_DESTROY
 		{
 			ivci.image = m_backBufferColorImage[ii];
 
-			result = vkCreateImageView(device, &ivci, allocatorCb, &m_backBufferColorImageView[ii]);
+			result = vkCreateImageView(device, &ivci, NULL, &m_backBufferColorImageView[ii]);
 
 			if (VK_SUCCESS != result)
 			{
@@ -7382,8 +7339,8 @@ VK_DESTROY
 
 		for (uint32_t ii = 0; ii < m_numSwapchainImages; ++ii)
 		{
-			if (VK_SUCCESS != vkCreateSemaphore(device, &sci, allocatorCb, &m_presentDoneSemaphore[ii])
-			||  VK_SUCCESS != vkCreateSemaphore(device, &sci, allocatorCb, &m_renderDoneSemaphore[ii]) )
+			if (VK_SUCCESS != vkCreateSemaphore(device, &sci, NULL, &m_presentDoneSemaphore[ii])
+			||  VK_SUCCESS != vkCreateSemaphore(device, &sci, NULL, &m_renderDoneSemaphore[ii]) )
 			{
 				BX_TRACE("Create swapchain error: vkCreateSemaphore failed %d: %s.", result, getName(result) );
 				return result;
@@ -7503,7 +7460,6 @@ VK_DESTROY
 		VkResult result = VK_SUCCESS;
 
 		const VkDevice device = s_renderVK->m_device;
-		const VkAllocationCallbacks* allocatorCb = s_renderVK->m_allocatorCb;
 
 		VkRenderPass renderPass;
 		result = s_renderVK->getRenderPass(*this, &renderPass);
@@ -7540,7 +7496,7 @@ VK_DESTROY
 			fci.height = m_sci.imageExtent.height;
 			fci.layers = 1;
 
-			result = vkCreateFramebuffer(device, &fci, allocatorCb, &m_backBufferFrameBuffer[ii]);
+			result = vkCreateFramebuffer(device, &fci, NULL, &m_backBufferFrameBuffer[ii]);
 
 			if (VK_SUCCESS != result)
 			{
@@ -7878,7 +7834,6 @@ VK_DESTROY
 		if (m_numTh > 0)
 		{
 			const VkDevice device = s_renderVK->m_device;
-			const VkAllocationCallbacks* allocatorCb = s_renderVK->m_allocatorCb;
 
 			VK_CHECK(s_renderVK->getRenderPass(m_numTh, m_attachment, &m_renderPass) );
 
@@ -7927,7 +7882,7 @@ VK_DESTROY
 			fci.height = m_height;
 			fci.layers = m_attachment[0].numLayers;
 
-			VK_CHECK(vkCreateFramebuffer(device, &fci, allocatorCb, &m_framebuffer) );
+			VK_CHECK(vkCreateFramebuffer(device, &fci, NULL, &m_framebuffer) );
 
 			m_currentFramebuffer = m_framebuffer;
 		}
@@ -8075,14 +8030,13 @@ VK_DESTROY
 
 		VkResult result = VK_SUCCESS;
 
+		const VkDevice device = s_renderVK->m_device;
+
 		for (uint32_t ii = 0; ii < m_numFramesInFlight; ++ii)
 		{
-			result = vkCreateCommandPool(
-				  s_renderVK->m_device
-				, &cpci
-				, s_renderVK->m_allocatorCb
-				, &m_commandList[ii].m_commandPool
-				);
+			CommandList& commandList = m_commandList[ii];
+
+			result = vkCreateCommandPool(device, &cpci, NULL, &commandList.m_commandPool);
 
 			if (VK_SUCCESS != result)
 			{
@@ -8090,13 +8044,9 @@ VK_DESTROY
 				return result;
 			}
 
-			cbai.commandPool = m_commandList[ii].m_commandPool;
+			cbai.commandPool = commandList.m_commandPool;
 
-			result = vkAllocateCommandBuffers(
-				  s_renderVK->m_device
-				, &cbai
-				, &m_commandList[ii].m_commandBuffer
-				);
+			result = vkAllocateCommandBuffers(device, &cbai, &commandList.m_commandBuffer);
 
 			if (VK_SUCCESS != result)
 			{
@@ -8104,12 +8054,7 @@ VK_DESTROY
 				return result;
 			}
 
-			result = vkCreateFence(
-				  s_renderVK->m_device
-				, &fci
-				, s_renderVK->m_allocatorCb
-				, &m_commandList[ii].m_fence
-				);
+			result = vkCreateFence(device, &fci, NULL, &commandList.m_fence);
 
 			if (VK_SUCCESS != result)
 			{
@@ -8128,9 +8073,11 @@ VK_DESTROY
 
 		for (uint32_t ii = 0; ii < m_numFramesInFlight; ++ii)
 		{
-			vkDestroy(m_commandList[ii].m_fence);
-			m_commandList[ii].m_commandBuffer = VK_NULL_HANDLE;
-			vkDestroy(m_commandList[ii].m_commandPool);
+			CommandList& commandList = m_commandList[ii];
+
+			vkDestroy(commandList.m_fence);
+			commandList.m_commandBuffer = VK_NULL_HANDLE;
+			vkDestroy(commandList.m_commandPool);
 		}
 	}
 
