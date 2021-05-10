@@ -4464,7 +4464,17 @@ VK_DESTROY
 	{
 		for (uint32_t ii = 0; ii < m_memoryProperties.memoryTypeCount; ++ii)
 		{
-			// TODO release
+			Pool& pool = m_pools[ii];
+			for (size_t jj = 0, num = pool.m_blocks.size(); jj < num; ++jj)
+			{
+				Block& block = pool.m_blocks[jj];
+				if (block.m_mapCount > 0)
+				{
+					vkUnmapMemory(s_renderVK->m_device, block.m_memory);
+				}
+				s_renderVK->release(block.m_memory);
+			}
+			pool.m_blocks.clear();
 		}
 	}
 
