@@ -387,24 +387,38 @@ VK_DESTROY_FUNC(DescriptorSet);
 		VkDeviceMemory m_memory = VK_NULL_HANDLE;
 		VkDeviceSize m_offset;
 		VkDeviceSize m_size;
-		uint32_t m_pool;
 		VkMemoryPropertyFlags m_properties;
+
+		uint32_t m_pool;
+		uint32_t m_id;
 	};
 
 	struct MemoryAllocatorVK
 	{
+		struct ResourceType
+		{
+			enum Enum
+			{
+				LinearImage,
+				OptimalImage,
+				Buffer,
+				Free
+			};
+		};
+
 		struct Allocation
 		{
+			ResourceType::Enum m_type;
 			VkDeviceSize m_offset;
 			VkDeviceSize m_size;
-			bool occupied;
 		};
 
 		struct Block
 		{
 			VkDeviceMemory m_memory;
+			VkDeviceSize m_currentOffset;
 			VkDeviceSize m_size;
-			VkDeviceSize m_pointer;
+			
 			uint32_t m_mapCount;
 			void* m_mapped;
 
@@ -424,10 +438,10 @@ VK_DESTROY_FUNC(DescriptorSet);
 		void init();
 		void shutdown();
 
-		VkResult createBuffer(const VkBufferCreateInfo& _info, MemoryType::Enum _type, ::VkBuffer* _buffer, AllocationVK* _allocation);
-		VkResult createImage(const VkImageCreateInfo& _info, MemoryType::Enum _type, ::VkImage* _image, AllocationVK* _allocation);
+		VkResult createBuffer(const VkBufferCreateInfo& _info, MemoryType::Enum _memoryType, ::VkBuffer* _buffer, AllocationVK* _allocation);
+		VkResult createImage(const VkImageCreateInfo& _info, MemoryType::Enum _memoryType, ::VkImage* _image, AllocationVK* _allocation);
 
-		VkResult allocate(const VkMemoryRequirements& _requirements, const VkMemoryDedicatedAllocateInfoKHR* _dedicatedInfo, MemoryType::Enum _type, AllocationVK* _allocation);
+		VkResult allocate(ResourceType::Enum _resourceType, MemoryType::Enum _memoryType, const VkMemoryRequirements& _requirements, const VkMemoryDedicatedAllocateInfoKHR* _dedicatedInfo, AllocationVK* _allocation);
 		void release(AllocationVK& _allocation);
 
 		VkResult map(const AllocationVK& _allocation, void** _pointer, VkDeviceSize offset = 0);
@@ -437,7 +451,7 @@ VK_DESTROY_FUNC(DescriptorSet);
 		VkResult invalidate(const AllocationVK& _allocation, VkDeviceSize _offset = 0, VkDeviceSize _size = VK_WHOLE_SIZE);
 
 		int32_t selectMemoryType(uint32_t _memoryTypeBits, uint32_t _propertyFlags, int32_t _startIndex = 0);
-		VkResult getFreeAllocation(uint32_t _pool, VkDeviceSize _size, const VkMemoryDedicatedAllocateInfoKHR* _dedicatedInfo, uint32_t* _blockIndex, uint32_t* _allocationIndex);
+		VkResult getFreeAllocation(uint32_t _pool, ResourceType::Enum _resourceType, VkDeviceSize _size, const VkMemoryDedicatedAllocateInfoKHR* _dedicatedInfo, uint32_t* _blockIndex, uint32_t* _allocationIndex);
 
 		bool findBlock(const AllocationVK& _allocation, uint32_t* _blockIndex) const;
 		bool findAllocation(const AllocationVK& _allocation, uint32_t blockIndex, uint32_t* _allocationIndex) const;

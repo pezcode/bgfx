@@ -801,6 +801,7 @@ VK_IMPORT_DEVICE
 			VKENUM(VK_ERROR_OUT_OF_DATE_KHR);
 			VKENUM(VK_ERROR_INCOMPATIBLE_DISPLAY_KHR);
 			VKENUM(VK_ERROR_VALIDATION_FAILED_EXT);
+			VKENUM(VK_ERROR_UNKNOWN);
 #undef VKENUM
 			default: break;
 		}
@@ -4469,7 +4470,7 @@ VK_DESTROY
 		}
 	}
 
-	VkResult MemoryAllocatorVK::createBuffer(const VkBufferCreateInfo& _info, MemoryType::Enum _type, ::VkBuffer* _buffer, AllocationVK* _allocation)
+	VkResult MemoryAllocatorVK::createBuffer(const VkBufferCreateInfo& _info, MemoryType::Enum _memoryType, ::VkBuffer* _buffer, AllocationVK* _allocation)
 	{
 		VkResult result = VK_SUCCESS;
 
@@ -4520,9 +4521,11 @@ VK_DESTROY
 			vkGetBufferMemoryRequirements(device, *_buffer, &mr);
 		}
 
-		result = allocate(mr
+		result = allocate(
+			  ResourceType::Buffer
+			, _memoryType
+			, mr
 			, dedicatedAllocation ? &mdai : NULL
-			, _type
 			, _allocation
 			);
 
@@ -4543,7 +4546,7 @@ VK_DESTROY
 		return result;
 	}
 
-	VkResult MemoryAllocatorVK::createImage(const VkImageCreateInfo& _info, MemoryType::Enum _type, ::VkImage* _image, AllocationVK* _allocation)
+	VkResult MemoryAllocatorVK::createImage(const VkImageCreateInfo& _info, MemoryType::Enum _memoryType, ::VkImage* _image, AllocationVK* _allocation)
 	{
 		VkResult result = VK_SUCCESS;
 
@@ -4594,9 +4597,13 @@ VK_DESTROY
 			vkGetImageMemoryRequirements(device, *_image, &mr);
 		}
 
-		result = allocate(mr
+		result = allocate(
+			  VK_IMAGE_TILING_OPTIMAL == _info.imageType
+				? ResourceType::OptimalImage
+				: ResourceType::LinearImage
+			, _memoryType
+			, mr
 			, dedicatedAllocation ? &mdai : NULL
-			, _type
 			, _allocation
 			);
 
@@ -4617,12 +4624,12 @@ VK_DESTROY
 		return result;
 	}
 
-	VkResult MemoryAllocatorVK::allocate(const VkMemoryRequirements& _requirements, const VkMemoryDedicatedAllocateInfoKHR* _dedicatedInfo, MemoryType::Enum _type, AllocationVK* _allocation)
+	VkResult MemoryAllocatorVK::allocate(ResourceType::Enum _resourceType, MemoryType::Enum _memoryType, const VkMemoryRequirements& _requirements, const VkMemoryDedicatedAllocateInfoKHR* _dedicatedInfo, AllocationVK* _allocation)
 	{
 		VkMemoryPropertyFlags propertyFlags[3];
 		uint8_t propertyFlagsCount = 0;
 
-		switch (_type)
+		switch (_memoryType)
 		{
 		case MemoryType::Upload:
 			propertyFlags[propertyFlagsCount++] = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
@@ -4643,10 +4650,11 @@ VK_DESTROY
 		}
 
 		VkResult result = VK_ERROR_UNKNOWN;
+		int32_t poolIndex = -1;
 
 		for (uint8_t ii = 0; ii < propertyFlagsCount; ++ii)
 		{
-			int32_t poolIndex = -1;
+			poolIndex = -1;
 			do
 			{
 				poolIndex++;
@@ -4656,15 +4664,13 @@ VK_DESTROY
 				{
 					uint32_t blockIndex;
 					uint32_t allocationIndex;
-					result = getFreeAllocation(poolIndex, _requirements.size, _dedicatedInfo, &blockIndex, &allocationIndex);
+					result = getFreeAllocation(poolIndex, _resourceType, _requirements.size, _dedicatedInfo, &blockIndex, &allocationIndex);
 
 					if (VK_SUCCESS == result)
 					{
-						Pool& pool = m_pools[poolIndex];
+						const Pool& pool = m_pools[poolIndex];
 						const Block& block = pool.m_blocks[blockIndex];
 						const Allocation& allocation = block.m_allocations[allocationIndex];
-
-						BX_ASSERT(1 == block.m_allocations.size(), "");
 
 						_allocation->m_memory = block.m_memory;
 						_allocation->m_offset = allocation.m_offset;
@@ -4684,6 +4690,15 @@ VK_DESTROY
 			}
 		}
 
+		if (0 > poolIndex)
+		{
+			BX_TRACE("Failed to find memory that supports the requested flags:");
+			for (uint8_t ii = 0; ii < propertyFlagsCount; ++ii)
+			{
+				BX_TRACE("%d 0x%08x", ii, propertyFlags[ii]);
+			}
+		}
+
 		return result;
 	}
 
@@ -4697,25 +4712,33 @@ VK_DESTROY
 			{
 				Pool& pool = m_pools[_allocation.m_pool];
 				Block& block = pool.m_blocks[blockIndex];
-				const Allocation& allocation = block.m_allocations[allocationIndex];
+				Allocation& allocation = block.m_allocations[allocationIndex];
 
-				// TODO find allocation and don't release memory if it isn't the last allocation
-				// TODO release deferred so memory can be reclaimed within X frames
+				allocation.m_type = ResourceType::Free;
 
-				BX_ASSERT(0 == allocation.m_offset, "");
-
-				pool.m_allocationCount--;
-				pool.m_allocationSize -= block.m_size;
-
-				if (block.m_mapCount > 0)
+				if (1 < block.m_allocations.size() )
 				{
-					vkUnmapMemory(s_renderVK->m_device, block.m_memory);
+					BX_ASSERT(false, "Not implemented.");
+
+					// TODO find allocation and don't release memory if it isn't the last allocation
+					// TODO merge adjacent free allocations
+					// TODO release deferred so memory can be reclaimed within X frames
+				}
+				else
+				{
+					if (block.m_mapCount > 0)
+					{
+						vkUnmapMemory(s_renderVK->m_device, block.m_memory);
+					}
+					s_renderVK->release(block.m_memory);
+
+					pool.m_allocationCount--;
+					pool.m_allocationSize -= block.m_size;
+					pool.m_blocks.erase(pool.m_blocks.begin() + blockIndex);
 				}
 
-				s_renderVK->release(block.m_memory);
 				_allocation.m_memory = VK_NULL_HANDLE;
 
-				pool.m_blocks.erase(pool.m_blocks.begin() + blockIndex);
 				return;
 			}
 		}
@@ -4747,7 +4770,7 @@ VK_DESTROY
 			result = vkMapMemory(device, block.m_memory, 0, size, 0, &block.m_mapped);
 			if (VK_SUCCESS != result)
 			{
-				BX_TRACE("Map memory error: vkMapMemory failed %d: %s.", result, getName(result));
+				BX_TRACE("Map memory error: vkMapMemory failed %d: %s.", result, getName(result) );
 				return result;
 			}
 		}
@@ -4761,26 +4784,26 @@ VK_DESTROY
 	void MemoryAllocatorVK::unmap(const AllocationVK& _allocation)
 	{
 		uint32_t blockIndex;
-		if (findBlock(_allocation, &blockIndex))
+		if (findBlock(_allocation, &blockIndex) )
 		{
 			Pool& pool = m_pools[_allocation.m_pool];
 			Block& block = pool.m_blocks[blockIndex];
-			block.m_mapCount--;
-
-			if (0 == block.m_mapCount)
+			if (block.m_mapCount > 0)
 			{
-				vkUnmapMemory(s_renderVK->m_device, _allocation.m_memory);
-				block.m_mapped = NULL;
+				block.m_mapCount--;
+				if (0 == block.m_mapCount)
+				{
+					vkUnmapMemory(s_renderVK->m_device, _allocation.m_memory);
+					block.m_mapped = NULL;
+				}
 			}
 		}
 	}
 
 	VkResult MemoryAllocatorVK::flush(const AllocationVK& _allocation, VkDeviceSize _offset, VkDeviceSize _size)
 	{
-		BX_ASSERT(0 != (_allocation.m_properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT), "Memory to flush must be host-visible.");
-		// TODO check if memory is currently mapped
-
 		if (0 == _size
+		||  0 == (_allocation.m_properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
 		||  0 != (_allocation.m_properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) )
 		{
 			return VK_SUCCESS;
@@ -4795,10 +4818,8 @@ VK_DESTROY
 
 	VkResult MemoryAllocatorVK::invalidate(const AllocationVK& _allocation, VkDeviceSize _offset, VkDeviceSize _size)
 	{
-		BX_ASSERT(0 != (_allocation.m_properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT), "Memory to invalidate must be host-visible.");
-		// TODO check if memory is currently mapped
-
 		if (0 == _size
+		||  0 == (_allocation.m_properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
 		||  0 != (_allocation.m_properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) )
 		{
 			return VK_SUCCESS;
@@ -4859,11 +4880,10 @@ VK_DESTROY
 			}
 		}
 
-		BX_TRACE("Failed to find memory that supports flags 0x%08x.", _propertyFlags);
 		return -1;
 	}
 
-	VkResult MemoryAllocatorVK::getFreeAllocation(uint32_t _pool, VkDeviceSize _size, const VkMemoryDedicatedAllocateInfoKHR* _dedicatedInfo, uint32_t* _blockIndex, uint32_t* _allocationIndex)
+	VkResult MemoryAllocatorVK::getFreeAllocation(uint32_t _pool, ResourceType::Enum _resourceType, VkDeviceSize _size, const VkMemoryDedicatedAllocateInfoKHR* _dedicatedInfo, uint32_t* _blockIndex, uint32_t* _allocationIndex)
 	{
 		Pool& pool = m_pools[_pool];
 
@@ -4879,6 +4899,7 @@ VK_DESTROY
 		{
 			// TODO find free block
 			// TODO find free allocation inside block
+			BX_ASSERT(false, "Not implemented.");
 
 			if (UINT32_MAX != *_allocationIndex)
 			{
@@ -4906,7 +4927,7 @@ VK_DESTROY
 		if (VK_SUCCESS == result)
 		{
 			newBlock.m_size = mai.allocationSize;
-			newBlock.m_pointer = alignUp(_size, m_minAllocationSize);
+			newBlock.m_currentOffset = alignUp(_size, m_minAllocationSize);
 			newBlock.m_mapCount = 0;
 
 			*_blockIndex = uint32_t(pool.m_blocks.size() );
@@ -4917,7 +4938,7 @@ VK_DESTROY
 			Allocation newAllocation;
 			newAllocation.m_offset = 0;
 			newAllocation.m_size = _size;
-			newAllocation.occupied = true;
+			newAllocation.m_type = _resourceType;
 
 			*_allocationIndex = uint32_t(block.m_allocations.size() );
 			block.m_allocations.push_back(newAllocation);
@@ -4967,7 +4988,6 @@ VK_DESTROY
 
 	void MemoryAllocatorVK::alignMappedRange(const AllocationVK& _allocation, VkDeviceSize _offset, VkDeviceSize _size, VkMappedMemoryRange* _range)
 	{
-		BX_ASSERT(0 == _allocation.m_offset, "");
 		BX_ASSERT(_offset < _allocation.m_size, "Offset out of range.");
 
 		const VkDeviceSize pre = _offset - alignDown(_offset, m_mapAlignment);
